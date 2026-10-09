@@ -257,6 +257,49 @@ try {
 
 //#endregion
 
+//#region the advertised repository
+
+// The mistake this exists for: the manifest pointed at `github.com/lakerian/dsh-plugin-term-dictionary`
+// while the repository was actually named `lakerian-dsh-plugin-term-dictionary`. Nothing local could
+// see that — the url is a perfectly valid https url to a project that does not exist, so the npm page
+// and the curated list would both have linked a 404. Two API calls settle it.
+const repoSlug = (normaliseRepo(manifest.repository) ?? '').replace(/^https:\/\/github\.com\//, '');
+if (!/^[^/]+\/[^/]+$/.test(repoSlug)) {
+	console.log('warn the repository is not a github url, so the existence check was skipped');
+} else {
+	const api = `https://api.github.com/repos/${repoSlug}`;
+	const headers = { 'User-Agent': 'dsh-plugin-release-check', Accept: 'application/vnd.github+json' };
+	try {
+		const response = await fetch(api, { headers, signal: AbortSignal.timeout(15000) });
+		if (response.status === 404) {
+			expect(`the advertised repository exists (${repoSlug})`, false, 'github answers 404 for it — check the name');
+		} else if (response.ok) {
+			const repo = await response.json();
+			expect(`the advertised repository exists (${repoSlug})`, true, `default branch ${repo.default_branch}`);
+			// The curated list and the npm page both link it, so a private repository is not shippable.
+			expect('the advertised repository is public', repo.private === false, `private=${repo.private}`);
+			// Required by the listing's rules, and invisible from inside the checkout.
+			const topics = await fetch(`${api}/topics`, { headers, signal: AbortSignal.timeout(15000) });
+			const names = topics.ok ? (await topics.json()).names ?? [] : [];
+			expect('the repository carries the dsh-plugin topic', names.includes('dsh-plugin'), topics.ok ? names.join(',') || 'no topics' : `HTTP ${topics.status}`);
+		} else {
+			console.log(`warn github answered HTTP ${response.status} for ${repoSlug}; the local checks above still stand`);
+		}
+	} catch (error) {
+		const cause = error?.cause?.code ?? error?.cause?.message ?? error.message;
+		// The one failure this machine really produces: a TLS-inspecting proxy whose CA is in the
+		// Windows certificate store but not in Node's, so every github.com request from Node dies with
+		// UNABLE_TO_VERIFY_LEAF_SIGNATURE while PowerShell and `git push` (over ssh) are fine. Naming
+		// the flag is the difference between a mystery and a workaround.
+		const remedy = String(cause).includes('UNABLE_TO_VERIFY') || String(cause).includes('certificate')
+			? ' — a TLS-inspecting proxy: rerun as `node --use-system-ca tools/check-release-ready.mjs`'
+			: '';
+		console.log(`warn could not ask github about the repository (${cause})${remedy}; the local checks above still stand`);
+	}
+}
+
+//#endregion
+
 console.log('');
 if (failures.length === 0) {
 	console.log('release-ready. the two steps that need your hands:');

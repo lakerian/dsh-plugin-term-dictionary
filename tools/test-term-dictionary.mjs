@@ -1365,6 +1365,133 @@ test("dictionary: the deleted list shows the tombstones, newest deletion first",
 	assert(listEntries(back).some((entry) => entry.term === "Quorum"), "and is live in the ordinary one again");
 });
 
+test("dictionary: a remark is a decision, and the later one wins in either merge order", () => {
+	// The same shape as `pinned`: a thing the user can say and take back needs its own clock, because
+	// `updatedAt` follows the definition and neither of these changes one. The failure this guards is
+	// the one unpinning had: an OR (or a value-only comparison) can only ever add, so a retraction on
+	// one machine comes back from the other on the next sync.
+	const { emptyState, editEntry, listEntries, mergeState } = loadCore("dictionary.js");
+	const state = editEntry(emptyState({ now: 1 }), "Quorum", { definition: { gloss: "g" } }, { now: 10 }).state;
+	const marked = editEntry(state, "Quorum", { feedback: { kind: "wrong-gloss", note: "太笼统" }, untrusted: true }, { now: 20 }).state;
+	assertEqual(listEntries(marked, "", "flagged").map((entry) => entry.term), ["Quorum"], "a remark flags the entry");
+
+	// An unrelated save must not move either decision: fixing a typo in the gloss is not a retraction.
+	const edited = editEntry(marked, "Quorum", { definition: { gloss: "g2" } }, { now: 30 }).state;
+	assertEqual(listEntries(edited, "", "flagged").length, 1, "an unrelated save leaves the remark alone");
+	assertEqual(listEntries(edited)[0].feedbackAt, 20, "and does not re-stamp when it was made");
+
+	// Retraction in the SAME millisecond as the remark it takes back: the stamp has to advance anyway,
+	// or the retraction would tie with the remark and lose to it (the comparison is strict). Two clicks
+	// inside one millisecond is not a hypothetical — it is a double-click.
+	const sameMs = editEntry(marked, "Quorum", { feedback: null, untrusted: false }, { now: 20 }).state;
+	assertEqual(listEntries(sameMs, "", "flagged").length, 0, "a retraction in the same millisecond still wins");
+	assertEqual(listEntries(sameMs)[0].feedbackAt > 20, true, "because its stamp is strictly later");
+	assertEqual(listEntries(mergeState(sameMs, marked, { now: 40 }), "", "flagged").length, 0, "and it survives the merge that still carries the remark");
+
+	// And a retraction later than the remark, for the ordinary case.
+	const cleared = editEntry(edited, "Quorum", { feedback: null, untrusted: false }, { now: 30 }).state;
+	assertEqual(listEntries(cleared, "", "flagged").length, 0, "clearing takes the entry off the list");
+	assertEqual(listEntries(cleared)[0].untrusted, false, "and takes the verdict with it");
+	assertEqual(listEntries(cleared)[0].feedbackAt > 20, true, "the retraction is stamped strictly later than the remark");
+
+	// The copy that still carries the remark cannot bring it back — in either direction, because both
+	// sides run the same merge and have to converge.
+	assertEqual(listEntries(mergeState(cleared, marked, { now: 40 }), "", "flagged").length, 0, "the older remark loses the merge");
+	assertEqual(listEntries(mergeState(marked, cleared, { now: 40 }), "", "flagged").length, 0, "in both directions");
+});
+
+test("dictionary: an unknown feedback kind degrades to \"other\" instead of refusing the remark", () => {
+	// A remark is the user's words. A category this version does not know — written by a newer one, or
+	// hand-edited into the file — is not a reason to drop them; the vocabulary can grow without the
+	// data layer treating yesterday's file as corrupt.
+	const { emptyState, editEntry, listEntries } = loadCore("dictionary.js");
+	const state = editEntry(
+		editEntry(emptyState({ now: 1 }), "Quorum", { definition: { gloss: "g" } }, { now: 10 }).state,
+		"Quorum",
+		{ feedback: { kind: "wrong-translation", note: "n".repeat(400) } },
+		{ now: 20 }
+	).state;
+	const entry = listEntries(state)[0];
+	assertEqual(entry.feedback.kind, "other", "the unfamiliar category becomes other");
+	assertEqual(entry.feedback.note.length, 200, "and the note is clamped to what one field holds");
+});
+
+test("dictionary: the flagged list gathers both things the user said", () => {
+	// Two independent claims — "here is what is wrong" and "stop treating this as authoritative" — and
+	// one view that has to show either of them. A deleted entry is out of it like it is out of every
+	// other live list.
+	const { emptyState, editEntry, removeEntry, listEntries } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	state = editEntry(state, "Remarked", { definition: { gloss: "g" } }, { now: 10 }).state;
+	state = editEntry(state, "Verdicted", { definition: { gloss: "g" } }, { now: 11 }).state;
+	state = editEntry(state, "Plain", { definition: { gloss: "g" } }, { now: 12 }).state;
+	state = editEntry(state, "Gone", { definition: { gloss: "g" } }, { now: 13 }).state;
+	state = editEntry(state, "Remarked", { feedback: { kind: "other", note: "" } }, { now: 20 }).state;
+	state = editEntry(state, "Verdicted", { untrusted: true }, { now: 21 }).state;
+	state = editEntry(state, "Gone", { untrusted: true }, { now: 22 }).state;
+	state = removeEntry(state, "Gone", { now: 30 }).state;
+
+	assertEqual(listEntries(state, "", "flagged").map((entry) => entry.term).sort(), ["Remarked", "Verdicted"], "both kinds of remark, and nothing else");
+	assertEqual(listEntries(state, "", "all").length, 3, "the flagged view is a filter over the live list, not a different list");
+	assertEqual(listEntries(state, "verd", "flagged").map((entry) => entry.term), ["Verdicted"], "and the search box narrows it too");
+});
+
+test("dictionary: a sighting cannot write over an entry the user called untrustworthy", () => {
+	// The quality loop's authority. It lives here rather than in the explain queue because EVERY
+	// automatic writer funnels through this function — the page's queue, a background refresh, the
+	// host's own `record` action — so one refusal covers all of them.
+	const { emptyState, editEntry, recordSighting, findEntry } = loadCore("dictionary.js");
+	const flagged = editEntry(emptyState({ now: 1 }), "Quorum", { definition: { gloss: "" }, untrusted: true }, { now: 10 }).state;
+	assertEqual(findEntry(flagged, "Quorum").untrusted, true, "the verdict is recorded");
+
+	const refused = recordSighting(flagged, { term: "Quorum", definition: { gloss: "自动写的" }, source: "llm" }, { now: 20 });
+	assertEqual(findEntry(refused.state, "Quorum").definition.gloss, "", "an automatic answer must not fill it in");
+	assertEqual(findEntry(refused.state, "Quorum").seen, 2, "while the sighting itself is still counted");
+
+	// The escape hatch: a generation the user pressed the button for is not the machine deciding alone.
+	const allowed = recordSighting(flagged, { term: "Quorum", definition: { gloss: "手动要来的" }, source: "llm", overridesUntrusted: true }, { now: 20 });
+	assertEqual(findEntry(allowed.state, "Quorum").definition.gloss, "手动要来的", "a requested generation may fill it");
+
+	// And an entry nobody flagged fills exactly as before: the guard is not a blanket refusal.
+	const plain = editEntry(emptyState({ now: 1 }), "Entropy", { definition: { gloss: "" } }, { now: 10 }).state;
+	const filled = recordSighting(plain, { term: "Entropy", definition: { gloss: "正常填充" }, source: "llm" }, { now: 20 });
+	assertEqual(findEntry(filled.state, "Entropy").definition.gloss, "正常填充", "an unflagged entry is still explained automatically");
+
+	// A sighting carries no decision of its own: it can neither set nor clear either field.
+	const smuggled = recordSighting(flagged, { term: "Quorum", feedback: null, untrusted: false }, { now: 20 });
+	assertEqual(findEntry(smuggled.state, "Quorum").untrusted, true, "a sighting never clears a verdict");
+	assertEqual(findEntry(smuggled.state, "Quorum").untrustedAt, 10, "and never re-stamps one");
+	const smuggledRemark = recordSighting(flagged, { term: "Quorum", feedback: { kind: "other", note: "偷渡" } }, { now: 20 });
+	assertEqual(findEntry(smuggledRemark.state, "Quorum").feedback, null, "nor writes a remark");
+});
+
+test("transfer: the feedback report says what was said, and never the conversation", () => {
+	// The half of feedback the host channel cannot carry: the host records a remark into this machine's
+	// session log, so a report is the only thing that can reach whoever could act on it. Its shape is
+	// therefore a privacy decision as much as a data one.
+	const { buildFeedbackReport } = loadCore("transfer.js");
+	const entries = [
+		{ term: "Quorum", key: "quorum", definition: { gloss: "多数派" }, context: "甲方的原话不该出现", feedback: { kind: "wrong-gloss", note: "太笼统" }, feedbackAt: 20, untrusted: true, untrustedAt: 15 },
+		{ term: "Entropy", key: "entropy", definition: { gloss: "熵" }, feedback: null, feedbackAt: 0, untrusted: true, untrustedAt: 30 },
+		{ term: "Plain", key: "plain", definition: { gloss: "x" }, feedback: null, feedbackAt: 0, untrusted: false, untrustedAt: 0 }
+	];
+	const report = buildFeedbackReport(entries, { now: 42 });
+	assertEqual([report.kind, report.version, report.exportedAt, report.count], ["dsh-term-dictionary-feedback", 1, 42, 2], "the envelope identifies itself and counts what it carries");
+	assertEqual(report.entries.map((entry) => entry.term), ["Entropy", "Quorum"], "newest remark first, so a reader starts at the top");
+	assertEqual(report.entries[1].kind, "wrong-gloss", "the category travels");
+	assertEqual(report.entries[1].note, "太笼统", "and the user's own words");
+	assertEqual(report.entries[1].at, 20, "and when they said it");
+	assertEqual("kind" in report.entries[0], false, "an entry with only a verdict carries no remark fields");
+	assertEqual(report.entries[0].untrusted, true, "but does carry the verdict");
+	assertEqual(JSON.stringify(report).includes("甲方的原话"), false, "the conversation is not in the report, by construction");
+	assertEqual("gloss" in report.entries[0], false, "nor the explanation, unless it is asked for");
+	assertEqual("context" in report.entries[0], false, "and never the entry's context under any option");
+	const withGloss = buildFeedbackReport(entries, { now: 42, includeGloss: true });
+	assertEqual(withGloss.entries[1].gloss, "多数派", "asking for the explanation attaches it");
+	assertEqual("context" in withGloss.entries[1], false, "even then the conversation stays out");
+	assertEqual(buildFeedbackReport([], { now: 42 }).entries.length, 0, "nothing flagged is an empty report, not a missing one");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
@@ -1741,10 +1868,21 @@ test("panel: the deleted view is behind its own tab, which the ordinary list doe
 
 	assertEqual(found.live.length, 1, "the ordinary list shows the live entry");
 	assertEqual(found.deleted.length, 0, "and not the deleted one, which is what makes the tab necessary");
-	assertEqual(found.tabs.map((tab) => tab.props.children), ["filterAll", "filterUnexplained", "filterPinned", "filterDeleted"], "four views, the deleted one last");
+	assertEqual(
+		found.tabs.map((tab) => tab.props.children),
+		["filterAll", "filterUnexplained", "filterPinned", "filterFlagged", "filterDeleted"],
+		"five views: the entry list, what was flagged, and what was deleted last"
+	);
 
-	found.tabs[3].props.onClick();
+	// Found by LABEL, not by position: the tabs are a list that grows, and an index that silently
+	// starts pointing at a different view is a check that keeps passing while testing the wrong one.
+	const deletedTab = found.tabs.find((tab) => tab.props.children === "filterDeleted");
+	assert(deletedTab !== undefined, "there must be a tab labelled for the deleted view");
+	deletedTab.props.onClick();
 	assert(sets.includes("deleted"), `the tab must select the deleted view, saw ${JSON.stringify(sets)}`);
+	const flaggedTab = found.tabs.find((tab) => tab.props.children === "filterFlagged");
+	flaggedTab.props.onClick();
+	assert(sets.includes("flagged"), `and its neighbour selects the flagged view, saw ${JSON.stringify(sets)}`);
 });
 
 test("panel: the deleted view renders the tombstones and its 撤回 control names the term", () => {
@@ -1793,6 +1931,61 @@ test("panel: the deleted view renders the tombstones and its 撤回 control name
 	gather(blank);
 	assert(text.includes("deletedEmpty"), `an empty blacklist says so rather than rendering nothing, saw ${JSON.stringify(text)}`);
 	assertEqual(sets.length, 0, "the view owns no state of its own: rendering does not touch a single setter");
+});
+
+test("panel: the flagged view renders the remark and its 撤回 control names the term", () => {
+	// The row's job is to show what the user said — the category, their own words, and whether they
+	// also called the explanation untrustworthy. Retracting is one press on the same row.
+	const sets = [];
+	const react = makeReactStub({ onSet: (value) => sets.push(value) });
+	const bundle = loadBundle({ react });
+	assert(typeof bundle.exports.flaggedList === "function", "the flagged view must be reachable for checks");
+	const t = (key, values) => (values === undefined ? key : `${key}:${JSON.stringify(values)}`);
+	const cleared = [];
+	const page = bundle.exports.flaggedList({
+		entries: [
+			{ id: "id-1", term: "Quorum", key: "quorum", feedback: { kind: "wrong-gloss", note: "太笼统" }, feedbackAt: 20, untrusted: true, untrustedAt: 20 }
+		],
+		t,
+		onClear: (entry) => cleared.push(entry)
+	});
+
+	const rows = [];
+	const buttons = [];
+	const walk = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		if (typeof node.props?.["data-term-flagged"] === "string") rows.push(node);
+		if (node.props?.label === "flaggedClear" && typeof node.props.onClick === "function") buttons.push(node);
+		walk(node.props?.children);
+	};
+	walk(page);
+	assertEqual(rows.length, 1, "one row per flagged entry");
+	const text = [];
+	const gather = (node) => {
+		if (typeof node === "string" || typeof node === "number") text.push(String(node));
+		else if (Array.isArray(node)) node.forEach(gather);
+		else if (node !== null && typeof node === "object") gather(node.props?.children);
+	};
+	gather(rows[0]);
+	assert(text.includes("Quorum"), `the row must name the term, saw ${JSON.stringify(text)}`);
+	assert(text.includes("feedbackKind_wrong-gloss"), `and the category the user picked, saw ${JSON.stringify(text)}`);
+	assert(text.includes("太笼统"), "and their own words");
+	assert(text.includes("flaggedUntrusted"), "and the verdict on the explanation");
+	assert(text.some((part) => part.startsWith("flaggedAt")), "and when they said it");
+	assertEqual(buttons.length, 1, "with exactly one way to take it back");
+	buttons[0].props.onClick();
+	assertEqual(cleared.map((entry) => entry.id), ["id-1"], "which hands the row's own entry to the caller");
+
+	// Nothing flagged is a state, and the view owns no state of its own.
+	const blank = bundle.exports.flaggedList({ entries: [], t, onClear: () => {} });
+	text.length = 0;
+	gather(blank);
+	assert(text.includes("flaggedEmpty"), `an empty flagged view says so, saw ${JSON.stringify(text)}`);
+	assertEqual(sets.length, 0, "rendering it does not touch a single setter");
 });
 
 test("panel: the batch-selection control exists and does something", () => {
@@ -2239,22 +2432,23 @@ async function asyncChecks() {
 			return JSON.parse(copied[copied.length - 1]);
 		};
 		/**
-		 * The checkboxes of the EXPORT half.
+		 * The category checkboxes.
 		 *
-		 * The page carries the import half too, and its opt-in box is a checkbox as well — counting
-		 * every box on the page was how this check first passed for the wrong reason. The opt-in is
-		 * identified by the label it lives in, so the two halves cannot be confused again.
+		 * Identified by the label they live in — `data-term-domain` — rather than by being checkboxes:
+		 * the page has two OTHER checkbox rows (the import's "also take what I deleted" and the
+		 * feedback report's "attach the explanations"), and counting every box on the page is how this
+		 * check first passed for the wrong reason.
 		 */
 		const categoryBoxes = (tree) => {
 			const found = [];
-			const walk = (node, inOptIn) => {
+			const walk = (node, inCategory) => {
 				if (node === null || node === undefined || typeof node !== "object") return;
 				if (Array.isArray(node)) {
-					for (const child of node) walk(child, inOptIn);
+					for (const child of node) walk(child, inCategory);
 					return;
 				}
-				const here = inOptIn || node.props?.["data-term-dictionary"] === "transfer-include-deleted";
-				if (node.props?.type === "checkbox" && !here) found.push(node);
+				const here = inCategory || typeof node.props?.["data-term-domain"] === "string";
+				if (node.props?.type === "checkbox" && here) found.push(node);
 				walk(node.props?.children, here);
 			};
 			walk(tree, false);
@@ -2392,6 +2586,170 @@ async function asyncChecks() {
 		assertEqual(reportedCounts(second), { imported: 1, existing: 2, deleted: 0, duplicates: 2 }, "the deleted entry is imported, and no longer skipped");
 		assertEqual(face.store.list("", "all").map((entry) => entry.term).sort(), ["Entropy", "Idempotent", "Quorum"], "it is live again");
 		assertEqual(face.store.list("", "deleted").length, 0, "and off the deleted list");
+	});
+
+	await asyncCheck("panel: the editor carries the remark and the verdict into the store", "markEntry", async () => {
+		// The whole marking path, driven through the panel: open a row, say what is wrong, call the
+		// explanation untrustworthy, save. The three things that can go wrong here are all invisible in a
+		// screenshot — the patch never reaching the store, the remark being recorded as "untouched", and
+		// the verdict not travelling with it.
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { gloss: "多数派确认" } });
+
+		const props = { ...face, t: (key) => key, setToast: () => {} };
+		const renderPanel = () => {
+			react.__beginRender();
+			return bundle.components[index](props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+
+		const list = renderPanel();
+		const row = find(list, (node) => node.props?.["data-term-entry"] === "quorum")[0];
+		assert(row !== undefined, "the entry is listed");
+		row.props.onClick({ target: { closest: () => null } });
+
+		// Every interaction is followed by a render, because that is what a setState does in React: the
+		// next handler must close over the state the last one produced. Skipping the render leaves every
+		// handler reading the state it was created with, which is how this check first reported that
+		// saving a remark wrote nothing.
+		const editor = renderPanel();
+		const kind = find(editor, (node) => typeof node.props?.onSelect === "function" && node.props.label === "feedbackKindName")[0];
+		assert(kind !== undefined, "the editor must carry the remark's category");
+		assertEqual(kind.props.value, "wrong-gloss", "starting from a category rather than from nothing");
+		assertEqual(kind.props.options.map((option) => option.value), ["wrong-gloss", "wrong-term", "should-not-collect", "other"], "and offering exactly the kinds the data layer accepts");
+		kind.props.onSelect("wrong-term");
+
+		const afterKind = renderPanel();
+		const verdict = find(afterKind, (node) => typeof node.props?.onToggle === "function")[0];
+		assert(verdict !== undefined, "and the verdict on the explanation");
+		assertEqual(verdict.props.checked, false, "which starts off");
+		verdict.props.onToggle();
+
+		const afterVerdict = renderPanel();
+		const note = find(afterVerdict, (node) => node.props?.label === "feedbackNoteLabel" && typeof node.props.onChange === "function")[0];
+		assert(note !== undefined, "and a place for the user's own words");
+		note.props.onChange("说的是写入确认的副本数");
+
+		const afterNote = renderPanel();
+		const save = find(afterNote, (node) => node.props?.label === "saveAndClose" && typeof node.props.onClick === "function")[0];
+		assert(save !== undefined, "the editor must still save");
+		save.props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+
+		const entry = face.store.find("Quorum");
+		assertEqual(entry.feedback, { kind: "wrong-term", note: "说的是写入确认的副本数" }, "the remark reaches the store");
+		assertEqual(entry.untrusted, true, "and so does the verdict");
+		assertEqual(face.store.list("", "flagged").map((each) => each.term), ["Quorum"], "so the entry is in the flagged view");
+		assertEqual(entry.definition.gloss, "多数派确认", "and saving a remark did not disturb the explanation");
+
+		// The other half of the same rule: opening the editor to fix a typo in the gloss and saving must
+		// NOT read as "the user retracted their remark". That is what `feedbackTouched` is for.
+		const reopened = renderPanel();
+		const again = find(reopened, (node) => node.props?.["data-term-entry"] === "quorum")[0];
+		again.props.onClick({ target: { closest: () => null } });
+		const glossField = find(renderPanel(), (node) => node.props?.label === "glossLabel" && typeof node.props.onChange === "function")[0];
+		assert(glossField !== undefined, "the editor still edits the explanation");
+		glossField.props.onChange("多数派确认（改了个错别字）");
+		find(renderPanel(), (node) => node.props?.label === "saveAndClose" && typeof node.props.onClick === "function")[0].props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		const after = face.store.find("Quorum");
+		assertEqual(after.feedback, { kind: "wrong-term", note: "说的是写入确认的副本数" }, "an unrelated save keeps the remark");
+		assertEqual(after.untrusted, true, "and the verdict");
+		assertEqual(after.definition.gloss, "多数派确认（改了个错别字）", "while the explanation is what changed");
+
+		// And the case that makes `feedbackTouched` load-bearing at all: editing an entry nobody flagged
+		// must not CREATE a remark. Writing the two fields unconditionally would flag every entry the
+		// user ever fixes a typo in — an empty "wrong explanation" remark on all of them, which the
+		// flagged view would then list.
+		await face.store.saveEntry("Entropy", { definition: { gloss: "熵" } });
+		const plainRow = find(renderPanel(), (node) => node.props?.["data-term-entry"] === "entropy")[0];
+		assert(plainRow !== undefined, "the second entry is listed");
+		plainRow.props.onClick({ target: { closest: () => null } });
+		const plainGloss = find(renderPanel(), (node) => node.props?.label === "glossLabel" && typeof node.props.onChange === "function")[0];
+		plainGloss.props.onChange("熵（改了个错别字）");
+		find(renderPanel(), (node) => node.props?.label === "saveAndClose" && typeof node.props.onClick === "function")[0].props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		const plain = face.store.find("Entropy");
+		assertEqual(plain.feedback, null, "fixing a typo on an unflagged entry does not create a remark");
+		assertEqual(plain.definition.gloss, "熵（改了个错别字）", "while the fix lands");
+		assertEqual(face.store.list("", "flagged").map((each) => each.term), ["Quorum"], "so only the entry the user actually flagged is in that view");
+	});
+
+	await asyncCheck("transfer: the export page writes the feedback report it offers", "feedbackReport", async () => {
+		// The report is the half of feedback that can reach someone else, so the page that writes it is
+		// worth driving: what it copies is what a receiver gets, and the explanation is attached only
+		// when the user ticks the box.
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { gloss: "多数派确认" } });
+		await face.store.saveEntry("Plain", { definition: { gloss: "x" } });
+		await face.store.markEntry("Quorum", { feedback: { kind: "wrong-gloss", note: "太笼统" }, untrusted: true });
+
+		const copied = [];
+		bundle.sandbox.navigator = { clipboard: { writeText: async (text) => { copied.push(text); } } };
+		const props = { store: face.store, t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`), setToast: () => {} };
+		const renderPage = () => {
+			react.__beginRender();
+			return bundle.exports.transferPage(props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+		const copyReport = (tree) => {
+			const button = find(tree, (node) => node.props?.label === "feedbackCopy" && typeof node.props.onClick === "function")[0];
+			assert(button !== undefined, "the page must offer copying the report");
+			button.props.onClick();
+			return JSON.parse(copied[copied.length - 1]);
+		};
+
+		const report = copyReport(renderPage());
+		assertEqual(report.kind, "dsh-term-dictionary-feedback", "the envelope says what it is");
+		assertEqual(report.count, 1, "one entry was flagged, and the report says so");
+		assertEqual(report.entries.map((entry) => entry.term), ["Quorum"], "only the flagged entry is in it");
+		assertEqual("gloss" in report.entries[0], false, "the explanation is not attached by default");
+		assertEqual(report.entries[0].note, "太笼统", "the user's own words are");
+
+		const tickBox = find(renderPage(), (node) => node.props?.["data-term-dictionary"] === "feedback-include-gloss")[0];
+		const box = find(tickBox, (node) => node.props?.type === "checkbox")[0];
+		assert(box !== undefined, "and attaching the explanation is a choice the page offers");
+		box.props.onChange();
+		const withGloss = copyReport(renderPage());
+		assertEqual(withGloss.entries[0].gloss, "多数派确认", "ticking it attaches the explanation");
+		assertEqual("context" in withGloss.entries[0], false, "while the conversation stays out either way");
 	});
 
 	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {

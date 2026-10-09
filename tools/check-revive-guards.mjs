@@ -91,8 +91,8 @@ const mutations = [
 	{
 		name: "the deleted tab is dropped from the tab list",
 		file: `lib/core/views.js`,
-		find: '["pinned", t("filterPinned")],\n\t\t\t\t["deleted", t("filterDeleted")]',
-		replace: '["pinned", t("filterPinned")]',
+		find: '["flagged", t("filterFlagged")],\n\t\t\t\t["deleted", t("filterDeleted")]',
+		replace: '["flagged", t("filterFlagged")]',
 		filter: "deleted view"
 	},
 	{
@@ -150,6 +150,62 @@ const mutations = [
 		find: "duplicates: plan.duplicates + (parsed.skipped ?? 0)",
 		replace: "duplicates: plan.duplicates",
 		filter: "transferImport"
+	},
+	{
+		name: "a remark is merged like an OR instead of a decision",
+		file: "lib/core/entries.js",
+		find: "\t\tfeedback: (incoming.feedbackAt ?? 0) > (current.feedbackAt ?? 0) ? incoming.feedback : current.feedback,",
+		replace: "\t\tfeedback: current.feedback ?? incoming.feedback,",
+		filter: "remark is a decision"
+	},
+	{
+		name: "the verdict on an explanation is merged like an OR",
+		file: "lib/core/entries.js",
+		find: "\t\tuntrusted: (incoming.untrustedAt ?? 0) > (current.untrustedAt ?? 0) ? incoming.untrusted === true : current.untrusted === true,",
+		replace: "\t\tuntrusted: current.untrusted === true || incoming.untrusted === true,",
+		filter: "remark is a decision"
+	},
+	{
+		name: "a retraction is stamped with the same instant as the remark it takes back",
+		file: "lib/core/dictionary.js",
+		find: "const feedbackStamp = mentionsFeedback ? Math.max(stamp, (base.feedbackAt ?? 0) + 1) : base.feedbackAt ?? 0;",
+		replace: "const feedbackStamp = mentionsFeedback ? stamp : base.feedbackAt ?? 0;",
+		filter: "remark is a decision"
+	},
+	{
+		name: "an automatic answer fills in an entry the user called untrustworthy",
+		file: "lib/core/dictionary.js",
+		find: "const refused = existing.untrusted === true && sighting.overridesUntrusted !== true;",
+		replace: "const refused = false;",
+		filter: "called untrustworthy"
+	},
+	{
+		name: "an unfamiliar feedback category is kept instead of degrading to other",
+		file: "lib/core/entries.js",
+		find: "kind: FEEDBACK_KINDS.includes(value.kind) ? value.kind : \"other\",",
+		replace: "kind: value.kind,",
+		filter: "unknown feedback kind"
+	},
+	{
+		name: "the feedback report attaches every explanation whether asked or not",
+		file: "lib/core/transfer.js",
+		find: "\t\t\tif (includeGloss) record.gloss = entry.definition?.gloss ?? \"\";",
+		replace: "\t\t\trecord.gloss = entry.definition?.gloss ?? \"\";",
+		filter: "feedback report says what was said"
+	},
+	{
+		name: "saving the editor always rewrites the remark, so an unrelated save retracts it",
+		file: "lib/core/views.js",
+		find: "feedback: editing.feedbackTouched ? { kind: editing.feedbackKind, note: editing.feedbackNote } : null,",
+		replace: "feedback: { kind: editing.feedbackKind, note: editing.feedbackNote },",
+		filter: "markEntry"
+	},
+	{
+		name: "the editor forgets that an existing remark was already made",
+		file: "lib/core/views.js",
+		find: "feedbackTouched: entry.feedback !== null && entry.feedback !== undefined,",
+		replace: "feedbackTouched: false,",
+		filter: "markEntry"
 	},
 	{
 		name: "the build guard copies literal text again",

@@ -43,12 +43,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lakerian/dsh-plugin-term-dictionary.git"
+    "url": "git+https://github.com/lakerian/lakerian-dsh-plugin-term-dictionary.git"
   },
   "bugs": {
-    "url": "https://github.com/lakerian/dsh-plugin-term-dictionary/issues"
+    "url": "https://github.com/lakerian/lakerian-dsh-plugin-term-dictionary/issues"
   },
-  "homepage": "https://github.com/lakerian/dsh-plugin-term-dictionary#readme",
+  "homepage": "https://github.com/lakerian/lakerian-dsh-plugin-term-dictionary#readme",
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
     "dsh": ">=0.2.0-rc.2"
