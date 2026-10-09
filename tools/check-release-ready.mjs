@@ -137,10 +137,20 @@ const expectedPaths = [...new Set([...REQUIRED, ...exportedFiles])];
 
 rmSync(scratch, { recursive: true, force: true });
 mkdirSync(scratch, { recursive: true });
+/**
+ * Run pnpm through a shell, as ONE command string.
+ *
+ * On Windows `pnpm` is a `.cmd`, so it needs a shell — but Node deprecates (DEP0190) `shell: true`
+ * together with an args array, because the arguments are concatenated rather than escaped. Passing
+ * the whole command as the string is the documented remedy, and the only argument that can contain
+ * spaces is a path, which is quoted here.
+ */
+const pnpm = (command, cwd) => execFileSync(command, { cwd, encoding: 'utf8', shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+
 let packed = null;
 let packError = null;
 try {
-	const output = execFileSync('pnpm', ['pack', '--pack-destination', scratch], { cwd: root, encoding: 'utf8', shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+	const output = pnpm(`pnpm pack --pack-destination "${scratch}"`, root);
 	packed = output.trim().split('\n').filter((line) => line.trim().endsWith('.tgz')).pop() ?? null;
 } catch (error) {
 	packError = `${error.message}`.split('\n')[0];
@@ -175,7 +185,7 @@ if (packed !== null && existsSync(packed)) {
 	writeFileSync(join(installRoot, 'package.json'), JSON.stringify({ name: 'release-install-check', private: true }, null, 2));
 	let installError = null;
 	try {
-		execFileSync('pnpm', ['add', packed, '--ignore-scripts'], { cwd: installRoot, encoding: 'utf8', shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+		pnpm(`pnpm add "${packed}" --ignore-scripts`, installRoot);
 	} catch (error) {
 		installError = `${error.message}`.split('\n')[0];
 	}
@@ -201,6 +211,49 @@ if (packed !== null && existsSync(packed)) {
 }
 
 rmSync(scratch, { recursive: true, force: true });
+
+//#endregion
+
+//#region the name on the registry
+
+/**
+ * A repository url in the shape npm stores, comparable across the ways people write it.
+ * @param value - a `repository` field: a string, or `{ url }`.
+ * @returns the normalised url, or null.
+ */
+function normaliseRepo(value) {
+	const raw = typeof value === 'string' ? value : value?.url;
+	if (typeof raw !== 'string') return null;
+	return raw.replace(/^git\+/, '').replace(/\.git$/, '').replace(/\/+$/, '').toLowerCase();
+}
+
+// The one check here that leaves the machine, and it is worth it: a first release that dies at
+// `npm publish` because the name is taken has wasted the whole setup. What matters is not "taken"
+// but "taken by somebody else" — republishing our own name is the normal update path, so the
+// published repository is compared with this manifest's rather than mere existence.
+const registry = (manifest.publishConfig?.registry ?? 'https://registry.npmjs.org/').replace(/\/+$/, '');
+try {
+	const response = await fetch(`${registry}/${manifest.name}`, { signal: AbortSignal.timeout(15000) });
+	if (response.status === 404) {
+		expect('the package name is free on npm', true, manifest.name);
+	} else if (response.ok) {
+		const published = await response.json();
+		const theirs = normaliseRepo(published.repository);
+		const ours = normaliseRepo(manifest.repository);
+		expect(
+			'the published name belongs to this project',
+			theirs !== null && theirs === ours,
+			`already published (latest ${published['dist-tags']?.latest ?? '?'}) from ${theirs ?? 'an unnamed repository'}`
+		);
+		console.log(`     (so this release is an UPDATE of ${manifest.name}, not a first publish)`);
+	} else {
+		console.log(`warn the registry answered HTTP ${response.status} for the name; the local checks above still stand`);
+	}
+} catch (error) {
+	// Offline is not a release blocker: everything else this gate checks is local, so say what could
+	// not be checked rather than failing the run on a network condition.
+	console.log(`warn could not ask the registry about the name (${`${error.message}`.split('\n')[0]}); the local checks above still stand`);
+}
 
 //#endregion
 
