@@ -1,0 +1,72 @@
+{
+  "name": "dsh-plugin-term-dictionary",
+  "version": "1.0.0",
+  "description": "术语词典：自动识别对话中的生僻术语并建立词条，左侧插件区提供词典面板。已收录的词在回复中被划出，鼠标靠近显示简短解释，点击进入词典对应词条；选中词句可一键添加词条。",
+  "icon": "./icon.svg",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dictionary",
+    "glossary",
+    "terminology",
+    "术语",
+    "词典"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/core/*.js",
+    "lib/core/package.json",
+    "lib/ROADMAP-lexicon.md",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lakerian/dsh-plugin-term-dictionary.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lakerian/dsh-plugin-term-dictionary/issues"
+  },
+  "homepage": "https://github.com/lakerian/dsh-plugin-term-dictionary#readme",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots",
+        "locale",
+        "layout"
+      ]
+    }
+  }
+}

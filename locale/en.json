@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Term Dictionary",
+    "description": "Detects rare jargon in agent replies and keeps a dictionary of entries, with a panel in the left sidebar. Collected terms are marked in the transcript: hover for a brief explanation, click to open the entry, or select a phrase to add it."
+  }
+}

@@ -1,0 +1,10 @@
+# Line endings: LF in the repository, on every platform.
+#
+# The sources are JavaScript that the host and the browser bundle both read, and the bundle is a
+# committed artifact (`lib/client.js`): a contributor whose git rewrites endings would produce a
+# diff of the whole file and a bundle that no longer matches what `--check` computed.
+* text=auto eol=lf
+
+*.svg text
+*.png binary
+*.tgz binary

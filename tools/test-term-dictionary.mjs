@@ -1,0 +1,2980 @@
+// Test harness for the term dictionary plugin.
+//
+// It checks the three things that can silently break this plugin:
+//   1. the pure core — tokenization, detection and the dictionary merge rules;
+//   2. the browser bundle — that the generated file parses, that its inlined
+//      module registry resolves every relative require, and that the plugin's
+//      `apply` registers the expected slots against a fake client context;
+//   3. the manifest contract — package.json, locale files and the patch agree on
+//      names and exports.
+//
+// Usage: node tools/test-term-dictionary.mjs [--filter <substring>]
+
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import vm from "node:vm";
+import { pluginDir, libDir, coreDir } from "./paths.mjs";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const require_ = createRequire(import.meta.url);
+
+const filterArg = process.argv.indexOf("--filter");
+const filter = filterArg > 0 ? process.argv[filterArg + 1] : "";
+
+let passed = 0;
+let failed = 0;
+const failures = [];
+
+/**
+ * Register and run one named check.
+ * @param name - the check's name.
+ * @param fn - a function that throws on failure.
+ */
+function test(name, fn) {
+	if (filter !== "" && !name.includes(filter)) return;
+	try {
+		fn();
+		passed++;
+		console.log(`  ok   ${name}`);
+	} catch (error) {
+		failed++;
+		failures.push({ name, error });
+		console.log(`  FAIL ${name}\n       ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+/** Assert a condition. */
+function assert(condition, message) {
+	if (!condition) throw new Error(message ?? "assertion failed");
+}
+
+/** Assert deep equality through JSON, which is enough for plain data. */
+function assertEqual(actual, expected, message) {
+	const left = JSON.stringify(actual);
+	const right = JSON.stringify(expected);
+	if (left !== right) throw new Error(`${message ?? "values differ"}\n       actual:   ${left}\n       expected: ${right}`);
+}
+
+/**
+ * Load a CommonJS core module.
+ * @param name - the file name under lib/core/.
+ * @returns its exports.
+ */
+function loadCore(name) {
+	return require_(join(coreDir, name));
+}
+
+/**
+ * Evaluate the generated browser bundle in a sandbox and return the factory's
+ * exports. This is the closest a Node test can get to the real page: it proves the
+ * inlined registry resolves every sibling require and that `apply` runs.
+ *
+ * @param options - `document` and `storage` overrides, plus `react` for the hooks.
+ * @returns `{ exports, slots, effects, locale, context }`.
+ */
+function loadBundle(options = {}) {
+	const path = join(libDir, "client.js");
+	assert(existsSync(path), "lib/client.js is missing — run node tools/build-client.mjs");
+	const source = readFileSync(path, "utf8");
+
+	const slots = [];
+	const effects = [];
+	const localeRegistrations = [];
+	const registered = [];
+	const components = [];
+	/** Every listener type the plugin attaches to the document. */
+	const documentListeners = [];
+	/**
+	 * The same registrations with the third argument kept.
+	 *
+	 * The type alone cannot answer the question this plugin's whole capture story turns on, so the
+	 * sandbox has to record the phase: dropping `options` here is what made the capture-phase check
+	 * unable to see the phase, and `check-pointer-guards.mjs`'s M2 mutation reported that as an escape.
+	 */
+	const documentListenerPhases = [];
+	const documentStub = options.document ?? {
+		querySelector: () => null,
+		addEventListener: (type, handler, listenerOptions) => {
+			documentListeners.push(type);
+			documentListenerPhases.push({ type, capture: listenerOptions === true || listenerOptions?.capture === true });
+		},
+		removeEventListener: () => {},
+		hidden: false
+	};
+	const storage = options.storage ?? new MapStorage();
+	let loaded = null;
+
+	const sandbox = {
+		// The plugin's own reports go to the console and nowhere else, so a check that wants to read one
+		// has to be the console. Swapping it is the only way to see what the page actually printed.
+		console: options.console ?? console,
+		setTimeout,
+		clearTimeout,
+		setInterval: () => 0,
+		clearInterval: () => {},
+		globalThis: null,
+		window: null,
+		document: documentStub,
+		localStorage: storage,
+		MutationObserver: class {
+			observe() {}
+			disconnect() {}
+		},
+		AbortController: undefined,
+		fetch: options.fetch
+	};
+	sandbox.globalThis = sandbox;
+	sandbox.window = sandbox;
+	sandbox.window.__ModuleLoader__ = {
+		load(registration) {
+			loaded = registration;
+		}
+	};
+	sandbox.addEventListener = () => {};
+	sandbox.removeEventListener = () => {};
+	vm.createContext(sandbox);
+	new vm.Script(source, { filename: path }).runInContext(sandbox);
+
+	assert(loaded !== null, "the bundle did not call window.__ModuleLoader__.load");
+	assertEqual(loaded.id, "dsh-plugin-term-dictionary", "bundle id must equal the package name");
+
+	const react = options.react ?? makeReactStub();
+	const platformRequire = (spec) => {
+		if (spec === "react") return react;
+		if (spec === "react/jsx-runtime") return { jsx: () => null, jsxs: () => null };
+		throw new Error(`node test harness has no platform module for ${JSON.stringify(spec)}`);
+	};
+	const exports = loaded.factory(platformRequire);
+	assert(typeof exports.apply === "function", "the bundle must export apply");
+	assert(Array.isArray(exports.inject), "the bundle must export inject");
+
+	const context = {
+		locale: {
+			bind: () => (key) => key,
+			register: (ns, dict) => {
+				localeRegistrations.push({ ns, dict });
+				return () => {};
+			},
+			subscribe: () => () => {},
+			getSnapshot: () => ({ active: "zh" })
+		},
+		slots: {
+			inject(key, callback) {
+				slots.push(key);
+				registered.push(...(callback() === undefined ? [] : []));
+				return () => {};
+			},
+			register(options, component) {
+				registered.push(options);
+				// The component is kept beside its options so a check can render it with
+				// the very props the slot would hand it.
+				components.push(component);
+				return () => {};
+			}
+		},
+		effect(fn, label) {
+			effects.push(label);
+			const dispose = fn();
+			return typeof dispose === "function" ? dispose : () => {};
+		},
+		on: () => () => {},
+		get: () => undefined,
+		logger: console
+	};
+	exports.apply(context);
+	return { exports, slots, effects, localeRegistrations, registered, components, documentListeners, documentListenerPhases, sandbox };
+}
+
+/** A minimal `Storage` stand-in that records what the plugin persists. */
+class MapStorage {
+	constructor() {
+		this.map = new Map();
+	}
+	getItem(key) {
+		return this.map.has(key) ? this.map.get(key) : null;
+	}
+	setItem(key, value) {
+		this.map.set(key, String(value));
+	}
+	removeItem(key) {
+		this.map.delete(key);
+	}
+}
+
+/**
+ * A React stub whose hooks invoke the callbacks they are given, so a component's
+ * body really runs — a crashed render body is the failure mode this catches.
+ *
+ * Its STATE PERSISTS ACROSS RENDERS, one slot per hook call, which is what makes a
+ * component's behaviour reachable rather than just its first frame: call `__beginRender()`
+ * and render it again to see what a click actually changed. Without that, a check can only
+ * assert that a control exists and that its handler asked for something — never that the
+ * next frame uses it, which is where a page that half-works hides.
+ *
+ * @param options - `onSet` receives every `useState` setter call, which is how a check
+ *   observes what a component decided; `seedState` maps a hook's INITIAL value to the value
+ *   the FIRST render should start from, for a view that is otherwise several clicks away.
+ * @returns a React-shaped object, plus `__beginRender`.
+ */
+function makeReactStub(options = {}) {
+	const onSet = typeof options.onSet === "function" ? options.onSet : null;
+	// Seeded by the initial VALUE rather than by call order on purpose: the order hooks are called in
+	// is not a contract, so an index-based seed would silently start the wrong hook the day a hook is
+	// added — and a check that renders the wrong view is a check that lies.
+	const seed = options.seedState ?? {};
+	/** One slot per hook, kept across renders the way a mounted component's state is. */
+	const slots = [];
+	let cursor = 0;
+	/** Claim the next hook slot, seeding it on first use. */
+	const claim = (initial) => {
+		const index = cursor++;
+		if (!(index in slots)) slots[index] = initial;
+		return index;
+	};
+	return {
+		createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children: children.length > 1 ? children : children[0] } }),
+		Fragment: Symbol.for("react.fragment"),
+		useState(initial) {
+			const first = typeof initial !== "function" && Object.prototype.hasOwnProperty.call(seed, initial) ? seed[initial] : typeof initial === "function" ? initial() : initial;
+			const index = claim(first);
+			return [
+				slots[index],
+				(next) => {
+					// The updater form is supported because components use it: `setEditing((previous) => …)`.
+					slots[index] = typeof next === "function" ? next(slots[index]) : next;
+					if (onSet !== null) onSet(next);
+				}
+			];
+		},
+		useEffect(fn) {
+			void fn();
+		},
+		useLayoutEffect(fn) {
+			void fn();
+		},
+		useMemo(fn) {
+			return fn();
+		},
+		useRef(value) {
+			return slots[claim({ current: value })];
+		},
+		useCallback(fn) {
+			return fn;
+		},
+		useSyncExternalStore(subscribe, getSnapshot) {
+			void subscribe;
+			return getSnapshot();
+		},
+		createContext: (value) => ({ Provider: null, Consumer: null, _value: value }),
+		/**
+		 * Start the next render of the same component, so its hooks meet their own slots again.
+		 *
+		 * Explicit rather than inferred: nothing in a hook call itself says which render it belongs to,
+		 * and guessing would make the slot a component happens to be given depend on how many renders
+		 * came before it — the same order-not-a-contract trap the seed avoids.
+		 */
+		__beginRender() {
+			cursor = 0;
+		}
+	};
+}
+
+console.log("term-dictionary tests\n");
+
+//#region manifest
+
+test("manifest: package name, exports and dsh.client agree", () => {
+	const pkg = JSON.parse(readFileSync(join(pluginDir, "package.json"), "utf8"));
+	assertEqual(pkg.name, "dsh-plugin-term-dictionary", "package name");
+	assert(pkg.exports?.["./client"] !== undefined, "package.json must export ./client");
+	assert(pkg.exports?.["./locale/*.json"] !== undefined, "package.json must export locale files or the host cannot read display metadata");
+	assertEqual(pkg.dsh?.client?.platform, "web", "dsh.client.platform");
+	assert(Array.isArray(pkg.dsh?.client?.inject) && pkg.dsh.client.inject.includes("slots"), "dsh.client.inject must include slots");
+	assertEqual(pkg.description && /[\u4e00-\u9fff]/.test(pkg.description), true, "package.json description must contain Chinese");
+});
+
+test("manifest: locale files carry Chinese and English metadata", () => {
+	const zh = JSON.parse(readFileSync(join(pluginDir, "locale", "zh.json"), "utf8"));
+	const en = JSON.parse(readFileSync(join(pluginDir, "locale", "en.json"), "utf8"));
+	assert(typeof zh.meta?.title === "string" && /[\u4e00-\u9fff]/.test(zh.meta.title), "zh title must be Chinese");
+	assert(typeof zh.meta?.description === "string" && /[\u4e00-\u9fff]/.test(zh.meta.description), "zh description must be Chinese");
+	assert(typeof en.meta?.title === "string" && en.meta.title.trim() !== "", "en title must be non-empty");
+	assert(typeof en.meta?.description === "string" && en.meta.description.trim() !== "", "en description must be non-empty");
+});
+
+test("manifest: the patch inserts exactly one row for this package", () => {
+	const patch = readFileSync(join(pluginDir, "cordis.patch.yml"), "utf8");
+	assert(patch.includes("dsh-plugin-term-dictionary"), "the patch must name the package");
+	assertEqual((patch.match(/name:\s*'dsh-plugin-term-dictionary'/g) ?? []).length, 1, "exactly one row");
+});
+
+test("manifest: every file the package lists exists", () => {
+	const pkg = JSON.parse(readFileSync(join(pluginDir, "package.json"), "utf8"));
+	for (const entry of pkg.files ?? []) {
+		if (entry.includes("*")) continue;
+		assert(existsSync(join(pluginDir, entry)), `missing listed file ${entry}`);
+	}
+});
+
+//#endregion
+
+//#region core
+
+const core = loadCore("core.js");
+
+test("core: normalizeTerm collapses case and whitespace", () => {
+	assertEqual(core.normalizeTerm("  Event   Sourcing "), "event sourcing", "normalizeTerm");
+	assertEqual(core.normalizeTerm(null), "", "normalizeTerm of null");
+});
+
+test("core: termId is stable and differs per term", () => {
+	assertEqual(core.termId("Event Sourcing"), core.termId("event sourcing"), "case must not change the id");
+	assert(core.termId("alpha") !== core.termId("beta"), "different terms need different ids");
+});
+
+test("core: tokenize splits latin runs and single CJK characters", () => {
+	const tokens = core.tokenize("使用 eventSourcing 模式, key_value-2.").map((token) => token.raw);
+	assertEqual(tokens, ["使", "用", "eventSourcing", "模", "式", "key_value-2"], "tokenize");
+});
+
+test("core: tokenize offsets point back into the source", () => {
+	const text = "abc def";
+	const [first, second] = core.tokenize(text);
+	assertEqual(text.slice(first.start, first.end), "abc", "first token slice");
+	assertEqual(text.slice(second.start, second.end), "def", "second token slice");
+});
+
+test("core: shape tests recognise identifiers, acronyms and jargon suffixes", () => {
+	assertEqual(core.looksLikeIdentifier("eventSourcing"), true, "camelCase");
+	assertEqual(core.looksLikeIdentifier("snake_case"), true, "snake_case");
+	assertEqual(core.looksLikeIdentifier("plain"), false, "plain word");
+	assertEqual(core.isAcronym("API"), true, "API");
+	assertEqual(core.isAcronym("Api"), false, "Api is not an acronym");
+	assertEqual(core.hasTechnicalMorphology("serialization"), true, "serialization");
+	assertEqual(core.hasTechnicalMorphology("cat"), false, "cat");
+});
+
+test("core: contextAround returns whole sentences and clamps", () => {
+	const text = "First sentence. The term appears here. Third sentence.";
+	const at = text.indexOf("term");
+	const context = core.contextAround(text, at, at + 4);
+	assert(context.includes("term appears"), `context must contain the term, got ${context}`);
+	assert(context.length <= 240, "context must be clamped");
+});
+
+//#endregion
+
+//#region dictionary
+
+const dictionaryModule = loadCore("dictionary.js");
+const { createDictionaryStore } = loadCore("store.js");
+
+test("dictionary: an empty document summarizes to zero", () => {
+	const state = dictionaryModule.emptyState({ now: 1 });
+	assertEqual(dictionaryModule.summarize(state), { total: 0, explained: 0, unexplained: 0, pinned: 0 }, "empty summary");
+});
+
+test("dictionary: a sighting creates one entry and a repeat merges into it", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	const first = dictionaryModule.recordSighting(state, { term: "Event Sourcing" }, { now: 2 });
+	assertEqual(first.created, true, "first sighting creates");
+	state = first.state;
+	const second = dictionaryModule.recordSighting(state, { term: "event sourcing" }, { now: 3 });
+	assertEqual(second.created, false, "second sighting merges");
+	assertEqual(second.state.entries.length, 1, "still one entry");
+	assertEqual(second.state.entries[0].seen, 2, "the sighting counter moves");
+});
+
+test("dictionary: a glossary gloss fills a missing definition but a user edit wins", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	state = dictionaryModule.recordSighting(state, { term: "quorum", glossary: { zh: "法定人数", gloss: "多数派确认。", domain: "系统" } }, { now: 2 }).state;
+	assertEqual(state.entries[0].definition.gloss, "多数派确认。", "glossary fills the gloss");
+	const edited = dictionaryModule.editEntry(state, "quorum", { definition: { gloss: "我自己的解释。" } }, { now: 3 });
+	state = edited.state;
+	assertEqual(state.entries[0].definition.gloss, "我自己的解释。", "the user edit wins");
+	assertEqual(state.entries[0].source, "user", "the source becomes user");
+	const later = dictionaryModule.recordSighting(state, { term: "quorum", glossary: { gloss: "内置解释。" } }, { now: 4 });
+	assertEqual(later.state.entries[0].definition.gloss, "我自己的解释。", "a later auto sighting must not overwrite a curated definition");
+});
+
+test("dictionary: a supplied definition outranks a glossary fallback", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	const result = dictionaryModule.recordSighting(
+		state,
+		{ term: "KV cache", definition: { zh: "键值缓存", gloss: "模型生成的解释。" }, source: "llm" },
+		{ now: 2 }
+	);
+	assertEqual(result.entry.definition.gloss, "模型生成的解释。", "the supplied definition is stored");
+	assertEqual(result.entry.source, "llm", "the source records the model");
+});
+
+test("dictionary: remove and find work by id and by term", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	state = dictionaryModule.recordSighting(state, { term: "sharding" }, { now: 2 }).state;
+	const entry = state.entries[0];
+	assert(dictionaryModule.findEntry(state, "sharding") !== undefined, "find by term");
+	assert(dictionaryModule.findEntry(state, entry.id) !== undefined, "find by id");
+	const removed = dictionaryModule.removeEntry(state, entry.id, { now: 3 });
+	assertEqual(removed.removed, true, "remove reports success");
+	// The document keeps a tombstone so the deletion can sync; the projection the
+	// user sees is empty, which is what "removed" means here.
+	assertEqual(removed.state.entries.filter((candidate) => candidate.deletedAt === 0).length, 0, "no live entry remains");
+	assertEqual(dictionaryModule.listEntries(removed.state, "", "all").length, 0, "the entry is gone from the list");
+	assertEqual(dictionaryModule.findEntry(removed.state, entry.id), undefined, "and it cannot be found");
+});
+
+test("dictionary: unpinning survives the merge with a copy that is still pinned", () => {
+	// The reported bug: 钉选功能无法取消. `pinned` was merged as
+	// `current.pinned || incoming.pinned`, so the user's unpin wrote false locally, the
+	// host's copy still said true, and the OR resurrected the pin — the page then adopts
+	// the merged document, so the toggle visibly snapped back on every click.
+	const pinned = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "v" }, pinned: true }, { now: 100 }).state;
+	const unpinned = dictionaryModule.editEntry(pinned, "q", { pinned: false }, { now: 200 }).state;
+	assertEqual(unpinned.entries[0].pinned, false, "the local unpin applies");
+	// The host's older, still-pinned copy comes back through the merge, in either order.
+	assertEqual(dictionaryModule.mergeDocuments(unpinned, pinned, { now: 900 }).entries[0].pinned, false, "the later unpin must win the merge");
+	assertEqual(dictionaryModule.mergeDocuments(pinned, unpinned, { now: 900 }).entries[0].pinned, false, "and win it from either side");
+	// Pinning again travels the same way.
+	const repinned = dictionaryModule.editEntry(unpinned, "q", { pinned: true }, { now: 300 }).state;
+	assertEqual(dictionaryModule.mergeDocuments(pinned, repinned, { now: 900 }).entries[0].pinned, true, "a later pin must win too");
+	// A sighting is an observation, not a decision: it does not advance `updatedAt`, so it
+	// must never clear a pin — which is the job the old OR was doing.
+	const sighted = dictionaryModule.recordSighting(pinned, { term: "q", context: "seen again" }, { now: 500 }).state;
+	assertEqual(dictionaryModule.mergeDocuments(sighted, pinned, { now: 900 }).entries[0].pinned, true, "a sighting must not clear a pin");
+});
+
+test("dictionary: listEntries filters and orders pinned first", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	state = dictionaryModule.recordSighting(state, { term: "alpha" }, { now: 2 }).state;
+	state = dictionaryModule.recordSighting(state, { term: "beta" }, { now: 3 }).state;
+	state = dictionaryModule.editEntry(state, "alpha", { definition: { gloss: "解释" }, pinned: true }, { now: 4 }).state;
+	const pinnedFirst = dictionaryModule.listEntries(state, "", "all");
+	assertEqual(pinnedFirst[0].term, "alpha", "a pinned entry sorts first");
+	assertEqual(dictionaryModule.listEntries(state, "bet", "all").length, 1, "search narrows the list");
+	assertEqual(dictionaryModule.listEntries(state, "", "unexplained").map((entry) => entry.term), ["beta"], "the unexplained filter");
+	assertEqual(dictionaryModule.listEntries(state, "", "pinned").map((entry) => entry.term), ["alpha"], "the pinned filter");
+});
+
+test("dictionary: normalizeState drops junk records and deduplicates", () => {
+	const state = dictionaryModule.normalizeState({
+		entries: [null, { term: "" }, { term: "ok", id: "x" }, { term: "OK", id: "x" }]
+	}, { now: 5 });
+	assertEqual(state.entries.length, 1, "only the usable entry survives");
+	assertEqual(state.entries[0].term, "ok", "the surviving term");
+});
+
+test("dictionary: mergeState keeps local edits and adopts new remote entries", () => {
+	let local = dictionaryModule.emptyState({ now: 1 });
+	local = dictionaryModule.editEntry(local, "shared", { definition: { gloss: "本地解释" } }, { now: 2 }).state;
+	local = dictionaryModule.recordSighting(local, { term: "local-only" }, { now: 3 }).state;
+	const remote = { entries: [{ term: "shared", source: "heuristic", definition: { gloss: "远程解释" } }, { term: "remote-only" }] };
+	const merged = dictionaryModule.mergeState(local, remote, { now: 4 });
+	const terms = merged.entries.map((entry) => entry.term).sort();
+	assertEqual(terms, ["local-only", "remote-only", "shared"], "both sides are represented");
+	const shared = merged.entries.find((entry) => entry.term === "shared");
+	assertEqual(shared.definition.gloss, "本地解释", "a lesser remote source must not overwrite a user definition");
+});
+
+test("dictionary: a deletion survives a union merge from the other side", () => {
+	// The regression guard for deletion resurrection. A union merge can only add,
+	// so without a tombstone the host's stale live copy would restore a term the
+	// user just deleted — which is exactly what happened before this existed.
+	let state = dictionaryModule.emptyState({ now: 1 });
+	state = dictionaryModule.recordSighting(state, { term: "Resurrection" }, { now: 2 }).state;
+	assertEqual(state.entries.length, 1, "the entry exists");
+	const removed = dictionaryModule.removeEntry(state, "Resurrection", { now: 10 });
+	assertEqual(removed.removed, true, "the removal is reported");
+	assertEqual(removed.state.entries.filter((entry) => entry.deletedAt === 0).length, 0, "no live entry remains");
+	// The host still holds the pre-deletion copy and sends it back.
+	const stale = { entries: [{ term: "Resurrection", lastSeenAt: 5, updatedAt: 5 }] };
+	const merged = dictionaryModule.mergeState(removed.state, stale, { now: 20 });
+	assertEqual(dictionaryModule.listEntries(merged, "", "all").length, 0, "the stale copy must not resurrect the entry");
+	assertEqual(dictionaryModule.summarize(merged).total, 0, "it is not counted either");
+	assertEqual(dictionaryModule.findEntry(merged, "Resurrection"), undefined, "and it is not findable");
+	// A NEW edit after the deletion revives it, which is the user changing their mind.
+	const revived = dictionaryModule.editEntry(merged, "Resurrection", { definition: { gloss: "重新添加。" } }, { now: 30 });
+	assertEqual(dictionaryModule.listEntries(revived.state, "", "all").length, 1, "an edit newer than the deletion revives the entry");
+});
+
+test("dictionary: a tombstone travels through serialization and back", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	state = dictionaryModule.recordSighting(state, { term: "gone" }, { now: 2 }).state;
+	state = dictionaryModule.removeEntry(state, "gone", { now: 10 }).state;
+	// The file keeps the tombstone so a reload knows the term was deleted, while a
+	// reader never sees it in `entries`.
+	const onDisk = dictionaryModule.serializeState(state);
+	assertEqual(onDisk.entries, [], "no live entry is serialized");
+	assertEqual(onDisk.deletedKeys, ["gone"], "the deleted key is published as a hint");
+	assertEqual(onDisk.backing.length, 1, "the tombstone itself is kept for the merge");
+	assertEqual(onDisk.backing[0].deletedAt, 10, "with its deletion time");
+	const reloaded = dictionaryModule.normalizeState(onDisk, { now: 11 });
+	assertEqual(dictionaryModule.listEntries(reloaded, "", "all").length, 0, "a reload still hides it");
+	const again = dictionaryModule.mergeState(reloaded, { entries: [{ term: "gone", updatedAt: 5 }] }, { now: 12 });
+	assertEqual(dictionaryModule.listEntries(again, "", "all").length, 0, "and it stays hidden after another merge");
+});
+
+test("dictionary: deletedKeys alone teaches a client that never held the tombstone", () => {
+	// A second window, or a page whose storage was cleared, only ever sees what the
+	// host publishes: live entries and a list of deleted keys.
+	let host = dictionaryModule.emptyState({ now: 1 });
+	host = dictionaryModule.recordSighting(host, { term: "quorum" }, { now: 2 }).state;
+	host = dictionaryModule.removeEntry(host, "quorum", { now: 10 }).state;
+	const published = JSON.parse(JSON.stringify(dictionaryModule.serializeState(dictionaryModule.seal(host))));
+	assertEqual(published.entries, [], "the deleted entry is not published");
+	assertEqual(published.deletedKeys, ["quorum"], "but its key is");
+	// The tombstone travels with the published document so the reader learns *when*
+	// the deletion happened. Without that time a later merge could only compare a
+	// live copy against nothing, which is the resurrection this whole mechanism
+	// exists to prevent.
+	assertEqual(published.backing.length, 1, "the deletion time travels too");
+	assertEqual(published.backing[0].deletedAt, 10, "with the real deletion stamp");
+
+	// A fresh client adopts that and hides the term.
+	const fresh = dictionaryModule.normalizeState(published, { now: 20 });
+	assertEqual(dictionaryModule.listEntries(fresh, "", "all").length, 0, "the fresh client holds no live entry");
+	assertEqual([...fresh.deletedKeys], ["quorum"], "and it does know the term was deleted");
+
+	// What it pushes back is its whole document: live entries, plus the keys it was
+	// told are deleted. The host must keep those deletions.
+	const pushed = {
+		entries: dictionaryModule.recordsOf(fresh).filter((entry) => entry.deletedAt === 0),
+		deletedKeys: [...fresh.deletedKeys]
+	};
+	const merged = dictionaryModule.mergeState(host, pushed, { now: 30 });
+	assertEqual(dictionaryModule.listEntries(merged, "", "all").length, 0, "the host keeps the deletion after the page's replace");
+	assertEqual([...merged.deletedKeys], ["quorum"], "and still publishes the key");
+	// A re-sighting at the host cannot undo it either.
+	assertEqual(dictionaryModule.listEntries(dictionaryModule.recordSighting(host, { term: "quorum" }, { now: 40 }).state, "", "all").length, 0, "a re-sighting must not revive it");
+});
+
+test("dictionary: clearAll leaves a tombstone per entry", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	state = dictionaryModule.recordSighting(state, { term: "one" }, { now: 2 }).state;
+	state = dictionaryModule.recordSighting(state, { term: "two" }, { now: 3 }).state;
+	const cleared = dictionaryModule.clearAll(state, { now: 10 });
+	assertEqual(cleared.removed, 2, "both entries were cleared");
+	assertEqual(dictionaryModule.listEntries(cleared.state, "", "all").length, 0, "nothing is visible");
+	assertEqual([...cleared.state.deletedKeys].sort(), ["one", "two"], "each entry left a tombstone");
+	// The critical part: a real remote copy — which carries its own timestamps —
+	// must not restore the dictionary.
+	const stale = { entries: [{ term: "one", updatedAt: 2 }, { term: "two", updatedAt: 3 }] };
+	const restored = dictionaryModule.mergeState(cleared.state, stale, { now: 20 });
+	assertEqual(dictionaryModule.listEntries(restored, "", "all").length, 0, "a union merge must not undo a clear");
+	// A copy the user genuinely re-curated does revive, which is the user explaining a
+	// cleared term again. Two things make that a real revival rather than a stale copy:
+	// the edit is newer than the deletion, and its `source` says a person asked for it.
+	// Provenance is what keeps an automatic re-detection from undoing a deliberate
+	// deletion, so the fixture carries it exactly as the editor path does.
+	const newer = { entries: [{ term: "one", updatedAt: 99, source: "user", definition: { gloss: "又加回来了。" } }] };
+	const revived = dictionaryModule.mergeState(cleared.state, newer, { now: 100 });
+	assertEqual(dictionaryModule.listEntries(revived, "", "all").map((entry) => entry.term), ["one"], "a newer edit revives");
+});
+
+test("dictionary: deleting one entry leaves the others alone", () => {
+	let state = dictionaryModule.emptyState({ now: 1 });
+	state = dictionaryModule.recordSighting(state, { term: "keep" }, { now: 2 }).state;
+	state = dictionaryModule.recordSighting(state, { term: "drop" }, { now: 3 }).state;
+	state = dictionaryModule.removeEntry(state, "drop", { now: 10 }).state;
+	assertEqual(dictionaryModule.listEntries(state, "", "all").map((entry) => entry.term), ["keep"], "only the target is gone");
+	// Adding a new term afterwards must not revive the deleted one.
+	state = dictionaryModule.recordSighting(state, { term: "added-later" }, { now: 11 }).state;
+	assertEqual(dictionaryModule.listEntries(state, "", "all").map((entry) => entry.term).sort(), ["added-later", "keep"], "the tombstone holds");
+});
+
+test("dictionary: merging a delete against an edit is order-independent", () => {
+	// The regression guard for the asymmetry: a notice applied before the merge would
+	// overwrite a live record without comparing times, so the same two documents
+	// merged in the other order gave a different answer — and one of those answers
+	// silently destroyed a strictly newer edit.
+	//
+	// The edit side is a `source: "user"` record, which is what the editor produces and
+	// what authorises a revival. A bare timestamp is not enough: a stale automatic copy
+	// arrives with a recent one too, and honouring time alone would let a union merge
+	// undo the user's deletion.
+	const deletedAt = (t) => dictionaryModule.removeEntry(dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "v1" } }, { now: 50 }).state, "q", { now: t }).state;
+	const editedAt = (t) => dictionaryModule.seal([{ ...dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "v2" } }, { now: t }).state.entries[0] }]);
+	const alive = (left, right) => dictionaryModule.mergeDocuments(left, right, { now: 900 }).entries.length > 0;
+
+	// A newer edit beats the deletion, whichever document is the base.
+	assertEqual(alive(deletedAt(100), editedAt(200)), true, "newer edit wins (deletion first)");
+	assertEqual(alive(editedAt(200), deletedAt(100)), true, "newer edit wins (edit first)");
+	// An older edit loses to the deletion, whichever document is the base.
+	assertEqual(alive(deletedAt(300), editedAt(200)), false, "older edit loses (deletion first)");
+	assertEqual(alive(editedAt(200), deletedAt(300)), false, "older edit loses (edit first)");
+});
+
+test("dictionary: only content the user asked for can revive a deleted term", () => {
+	// Provenance is the gate. Time alone would let the plugin's own automatic detection
+	// undo a deliberate deletion: a window that never learned of the tombstone builds a
+	// fresh entry stamped "now", which is always newer than the deletion.
+	const curated = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "mine" } }, { now: 100 }).state;
+	const deleted = dictionaryModule.removeEntry(curated, "q", { now: 2000 }).state;
+	const revive = (record) => dictionaryModule.listEntries(dictionaryModule.mergeState(deleted, { entries: [record] }, { now: 6000 }), "", "all").length;
+
+	assertEqual(revive({ term: "q", updatedAt: 5000, source: "auto", definition: { gloss: "auto" } }), 0, "an automatic copy does not revive");
+	assertEqual(revive({ term: "q", updatedAt: 5000, source: "heuristic", definition: { gloss: "glossary" } }), 0, "nor a glossary fill");
+	assertEqual(revive({ term: "q", updatedAt: 5000 }), 0, "nor a bare detection with no definition");
+	assertEqual(revive({ term: "q", updatedAt: 5000, source: "user", definition: { gloss: "typed" } }), 1, "the user's own text does");
+	assertEqual(revive({ term: "q", updatedAt: 5000, source: "llm", definition: { gloss: "explained" } }), 1, "and an explanation the user asked for");
+	// An automatic copy that is OLDER than the deletion cannot revive either.
+	assertEqual(revive({ term: "q", updatedAt: 5000, source: "user", definition: { gloss: "old" } }), 1, "a newer user text revives");
+	assertEqual(dictionaryModule.listEntries(dictionaryModule.mergeState(deleted, { entries: [{ term: "q", updatedAt: 1000, source: "user", definition: { gloss: "old" } }] }, { now: 6000 }), "", "all").length, 0, "an older user text does not");
+});
+
+test("dictionary: an undated deletion notice deletes only an uncurated term", () => {
+	// `deletedKeys` exists for a client that never held the tombstone, so it carries
+	// no deletion time and cannot be weighed against one. What it can still do is
+	// delete a term nobody has curated — an automatic entry with no explanation.
+	const curated = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "v1" } }, { now: 200 }).state;
+	const kept = dictionaryModule.mergeState(curated, { deletedKeys: ["q"] }, { now: 400 });
+	assertEqual(dictionaryModule.listEntries(kept, "", "all").length, 1, "a bare key does not delete a curated entry");
+
+	// An automatic entry: created by a sighting, so it has a real timestamp but no
+	// definition. That is what "uncurated" means, and it is reachable in production.
+	let auto = dictionaryModule.emptyState({ now: 1 });
+	auto = dictionaryModule.recordSighting(auto, { term: "q" }, { now: 500 }).state;
+	assertEqual(dictionaryModule.listEntries(auto, "", "all")[0].definition.gloss, "", "the automatic entry has no explanation");
+	const removed = dictionaryModule.mergeState(auto, { deletedKeys: ["q"] }, { now: 600 });
+	assertEqual(dictionaryModule.listEntries(removed, "", "all").length, 0, "a bare key does delete an uncurated record");
+	assertEqual([...removed.deletedKeys], ["q"], "and it is recorded as deleted");
+});
+
+test("dictionary: an explicit edit revives a deletion even when the clock runs behind", () => {
+	// Forward clock skew: the deletion carries a later stamp than the edit that
+	// follows it. Comparing clocks would reject the edit, and the user would watch
+	// the editor close with nothing saved — so an explicit edit revives outright.
+	let state = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "beta", { definition: { gloss: "v1" } }, { now: 100 }).state;
+	state = dictionaryModule.removeEntry(state, "beta", { now: 1000 }).state;
+	const edited = dictionaryModule.editEntry(state, "beta", { definition: { gloss: "v2" } }, { now: 200 });
+	assertEqual(dictionaryModule.listEntries(edited.state, "", "all").length, 1, "the edit revives the term");
+	assertEqual(edited.state.entries[0].definition.gloss, "v2", "and the typed text is stored");
+});
+
+test("dictionary: a sighting never revives, and never inherits edit authority", () => {
+	// The transient `edited` flag must not survive a spread: if a sighting inherited
+	// it, the transcript re-observing a term would revive the user's deletion.
+	let state = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "beta", { definition: { gloss: "v1" } }, { now: 100 }).state;
+	state = dictionaryModule.removeEntry(state, "beta", { now: 1000 }).state;
+	const seen = dictionaryModule.recordSighting(state, { term: "beta" }, { now: 200 });
+	assertEqual(dictionaryModule.listEntries(seen.state, "", "all").length, 0, "the sighting does not revive it");
+	assertEqual(seen.deleted, true, "and the caller is told it is still deleted");
+	// A sighting of a live term counts once and does not re-stamp the record.
+	let live = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "gamma", { definition: { gloss: "g" } }, { now: 100 }).state;
+	const once = dictionaryModule.recordSighting(live, { term: "gamma" }, { now: 500 });
+	assertEqual(once.state.entries[0].updatedAt, 100, "a sighting does not re-stamp the edit time");
+	assertEqual(once.state.entries[0].seen, 2, "but it does count");
+});
+
+test("dictionary: merging never invents an edit time", () => {
+	// A merge that re-stamped `updatedAt` with the merge clock made received content
+	// look like an edit made after a deletion, which is how an older copy could win.
+	const incoming = { entries: [{ term: "delta", updatedAt: 100, definition: { gloss: "d" } }] };
+	const merged = dictionaryModule.mergeState(dictionaryModule.emptyState({ now: 1 }), incoming, { now: 9999 });
+	assertEqual(merged.entries[0].updatedAt, 100, "the authored time survives the merge");
+});
+
+test("dictionary: the transient edit marker never reaches the wire", () => {
+	// The round-4 high finding. `edited` means "this arrival revives the term". It was
+	// persisted onto the tombstone a deletion produced, so the next round trip read the
+	// user's own deletion as a request to restore the term — and it came back. A term
+	// the user deletes must survive its own round trip.
+	let state = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "alpha", { definition: { gloss: "A" } }, { now: 100 }).state;
+	const deleted = dictionaryModule.removeEntry(state, "alpha", { now: 200 }).state;
+	const wire = JSON.parse(JSON.stringify(dictionaryModule.serializeState(deleted)));
+	assertEqual(wire.backing.length, 1, "the tombstone still travels");
+	assert(wire.backing[0].edited === undefined, "but the edit marker does not");
+	assert(wire.entries.every((entry) => entry.edited === undefined && entry.observed === undefined), "no live entry carries one either");
+
+	// Feeding that exact payload back to the local document must NOT revive the term.
+	const roundTripped = dictionaryModule.mergeState(deleted, wire, { now: 300 });
+	assertEqual(dictionaryModule.listEntries(roundTripped, "", "all").length, 0, "the deletion survives its own round trip");
+	assertEqual([...roundTripped.deletedKeys], ["alpha"], "and the term is still named as deleted");
+});
+
+test("dictionary: a merge weighs an arriving edit against the deletion in either order", () => {
+	// The order-independence guard covers a revival that arrives as an edited record.
+	// Reading the edit times off the arriving side alone made the two merge directions
+	// disagree, which is the same asymmetry the earlier rounds kept finding.
+	const editTime = (time) => dictionaryModule.seal([{ ...dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "v2" } }, { now: time }).state.entries[0], edited: true }]);
+	const removeAfter = (edit) => dictionaryModule.removeEntry(dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "v1" } }, { now: 50 }).state, "q", { now: edit }).state;
+	const mergeThem = (left, right) => dictionaryModule.mergeDocuments(left, right, { now: 900 });
+	// A revival that arrived before the deletion is older, so it loses both ways.
+	assertEqual(mergeThem(removeAfter(300), editTime(200)).entries.length, 0, "an older arriving edit loses (deletion first)");
+	assertEqual(mergeThem(editTime(200), removeAfter(300)).entries.length, 0, "an older arriving edit loses (deletion first) — reversed");
+	// A revival that arrived after the deletion wins both ways.
+	assertEqual(mergeThem(removeAfter(100), editTime(200)).entries.length, 1, "a newer arriving edit wins (deletion first)");
+	assertEqual(mergeThem(editTime(200), removeAfter(100)).entries.length, 1, "a newer arriving edit wins (edit first)");
+});
+
+test("dictionary: a re-curation survives the clock, and a stale copy does not revive", () => {
+	// The two halves of the rule, and the reason the second half is stated as "older"
+	// rather than "not marked as an edit": there is no marker any more. The decision is
+	// a comparison of two times, so the only thing that matters is which is newer.
+	//
+	// 1. Forward clock skew. The deletion is stamped later than the edit that follows it,
+	//    because the deleting machine's clock was ahead. `editEntry` stamps the revival
+	//    one millisecond past the tombstone it supersedes, so the text the user typed is
+	//    not thrown away by the next sync.
+	const state = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "v1" } }, { now: 100 }).state;
+	const deleted = dictionaryModule.removeEntry(state, "q", { now: 1000 }).state;
+	const typed = dictionaryModule.editEntry(deleted, "q", { definition: { gloss: "typed" } }, { now: 200 });
+	const revived = dictionaryModule.listEntries(typed.state, "", "all");
+	assertEqual(revived.length, 1, "the typed edit revives despite the clock");
+	assertEqual(revived[0].definition.gloss, "typed", "and the text is stored");
+	// It must also survive a round trip against the tombstone still on the wire.
+	const synced = dictionaryModule.mergeState(typed.state, JSON.parse(JSON.stringify(dictionaryModule.serializeState(deleted))), { now: 2000 });
+	assertEqual(dictionaryModule.listEntries(synced, "", "all").length, 1, "and the revival survives the tombstone coming back");
+
+	// 2. A copy that is older than the deletion cannot bring the term back, which is the
+	//    guarantee that keeps a union merge from undoing a deletion.
+	const stale = dictionaryModule.mergeState(deleted, { entries: [{ term: "q", updatedAt: 500, definition: { gloss: "stale" } }] }, { now: 10000 });
+	assertEqual(dictionaryModule.listEntries(stale, "", "all").length, 0, "an older copy does not revive");
+	const same = dictionaryModule.mergeState(deleted, { entries: [{ term: "q", updatedAt: 1000, definition: { gloss: "same" } }] }, { now: 10000 });
+	assertEqual(dictionaryModule.listEntries(same, "", "all").length, 0, "nor does one stamped at the same instant (a tie is a deletion)");
+});
+
+//#endregion
+
+//#region store-and-collector
+
+/**
+ * A minimal element whose rendered text is one text node, with the parent links the
+ * interaction layer walks. Only what `readRegion` and `termAtPoint` actually read.
+ * @param tag - the element's tag name.
+ * @param text - its own text.
+ * @param rect - its viewport box.
+ * @returns the element.
+ */
+function makeNode(tag, text, rect) {
+	const node = {
+		nodeType: 1,
+		tagName: tag,
+		nodeValue: null,
+		parentElement: null,
+		parentNode: null,
+		children: [],
+		childNodes: [],
+		innerText: text,
+		textContent: text,
+		rect: rect ?? { left: 0, top: 0, right: 600, bottom: 20, width: 600, height: 20 },
+		getAttribute: () => null,
+		hasAttribute: () => false,
+		contains(other) {
+			let at = other;
+			while (at !== null && at !== undefined) {
+				if (at === this) return true;
+				at = at.parentElement;
+			}
+			return false;
+		},
+		closest: () => null,
+		getBoundingClientRect() {
+			return this.rect;
+		}
+	};
+	if (typeof text === "string" && text !== "") {
+		const textNode = { nodeType: 3, nodeValue: text, textContent: text, parentElement: null, parentNode: null, children: [], childNodes: [] };
+		textNode.parentElement = node;
+		textNode.parentNode = node;
+		node.childNodes.push(textNode);
+	}
+	return node;
+}
+
+/**
+ * Attach a child to a fixture element.
+ * @param parent - the parent.
+ * @param child - the child.
+ * @returns the child.
+ */
+function attachNode(parent, child) {
+	child.parentElement = parent;
+	child.parentNode = parent;
+	parent.children.push(child);
+	parent.childNodes.push(child);
+	return child;
+}
+
+/**
+ * A region holding one paragraph, plus the document and window stubs the layer reads.
+ * @param text - the transcription text.
+ * @returns `{ region, document, window }`.
+ */
+function makeCollectorWorld(text) {
+	const region = makeNode("DIV", "");
+	const paragraph = attachNode(region, makeNode("P", text));
+	region.innerText = paragraph.innerText;
+	region.textContent = paragraph.textContent;
+	const documentStub = {
+		querySelector: (selector) => (typeof selector === "string" && selector.includes("conversation-region") ? region : null),
+		addEventListener: () => {},
+		removeEventListener: () => {},
+		caretRangeFromPoint: () => null
+	};
+	const windowStub = {
+		getSelection: () => ({ isCollapsed: true, rangeCount: 0, toString: () => "" }),
+		MutationObserver: class {
+			observe() {}
+			disconnect() {}
+		},
+		addEventListener: () => {},
+		removeEventListener: () => {},
+		setTimeout: (fn, ms) => setTimeout(fn, ms),
+		clearTimeout: (handle) => clearTimeout(handle),
+		innerWidth: 1280,
+		innerHeight: 800
+	};
+	return { region, document: documentStub, window: windowStub };
+}
+
+/**
+ * A detector that reports one term, so a check can drive the collector's refusal path
+ * without depending on which words the bundled lexicons happen to know. The refusal is
+ * reached only when the collector considers the term NEW, which is the only shape in
+ * which it is observable.
+ * @param term - the term to report.
+ * @returns the detector stub.
+ */
+function detectingOnly(term) {
+	return {
+		scan: () => [{ term, key: term, start: 4, end: 4 + term.length, known: false, confidence: 0.5 }],
+		// `undefined`, matching the real detector's miss shape. `null` is a *hit* to the
+		// guard, which tests against `undefined`, and returning it silently disabled the
+		// collection this stub exists to provoke.
+		glossaryOf: () => undefined,
+		knownOf: () => [],
+		bestCandidate: () => null,
+		findAll: () => []
+	};
+}
+
+/**
+ * Drive the collector against a REAL store, so the refusal path is not bypassed by a
+ * test seam. That seam is exactly what let a false "自动收录了 N 个术语" notice ship:
+ * the older check forced the answer with `setSightingAnswer`, which hid the fact that
+ * the store was dropping the `deleted` flag the collector reads.
+ *
+ * The store holds the tombstone but NO live entry — the only shape in which the refusal
+ * is reachable, because `recordSighting` needs a tombstone to refuse.
+ * @returns a promise settling when the check has run.
+ */
+async function storeChecks() {
+	await asyncCheck("store + interact: a refused sighting is not announced as collected", "collectorRefusal", async () => {
+		const { createInteractionLayer } = loadCore("interact.js");
+		const memory = new Map();
+		const storage = {
+			getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+			setItem: (key, value) => memory.set(key, String(value)),
+			removeItem: (key) => memory.delete(key)
+		};
+		const browserStore = dictionaryModule.createBrowserStore(storage, { warn: () => {} });
+		// A window that deleted a term: its document carries the tombstone and nothing live.
+		// The term is a rare identifier, which is what auto-collection is for — an ordinary
+		// word would never reach the store now.
+		let deleted = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "WriteAheadLog", { definition: { gloss: "先写一条。" } }, { now: 100 }).state;
+		deleted = dictionaryModule.removeEntry(deleted, "WriteAheadLog", { now: 2000 }).state;
+		await browserStore.save(deleted);
+		const store = createDictionaryStore({ local: browserStore, remote: null, logger: { warn: () => {} }, now: () => 5000 });
+		await store.hydrate();
+		assertEqual(store.list("", "all").length, 0, "nothing is live to begin with");
+		assertEqual(store.find("WriteAheadLog"), null, "and the term is not findable");
+
+		const world = makeCollectorWorld("the WriteAheadLog flush");
+		const toasts = [];
+		const sights = [];
+		const layer = createInteractionLayer({
+			detector: detectingOnly("WriteAheadLog"),
+			store: {
+				getState: () => store.getState(),
+				noteSighting: (sighting) => {
+					sights.push(sighting.term);
+					return store.noteSighting(sighting);
+				}
+			},
+			isWordCharacter: (character) => /\w/.test(character),
+			// Permissive on purpose: these checks are about the collector's LOGIC, while the
+			// shipped defaults (no code-shaped names, nothing under four characters) are asserted
+			// in the settings checks. Letting a preference decide the outcome here would hide a
+			// real regression in collection behind a switch.
+			collectSettings: () => ({ collectMinLength: 1, collectIdentifiers: true, collectCjk: true }),
+			logger: { warn: () => {} },
+			onExplain: () => {},
+			onSelection: () => {},
+			onToast: (toast) => toasts.push(toast),
+			document: world.document,
+			window: world.window
+		});
+		// The stub reports an ordinary-looking word, so the built-in rarity policy would
+		// skip it and the refusal path would never be reached. The filter seam narrows the
+		// policy for this check alone; the glossary and "already known" guards still run
+		// first, so the seam cannot make the layer decide anything unsafe.
+		layer.setAutoCreateFilter(() => true);
+		// `attach()` binds the conversation region, which the snapshot reads; the settle
+		// timer it schedules fires long after this pass, so `scanNow` still sees the message.
+		layer.attach();
+		try {
+			const created = await layer.scanNow();
+			assert(sights.includes("WriteAheadLog"), `the collector must have tried to record the deleted term, saw ${JSON.stringify(sights)}`);
+			assertEqual(created, 0, "a refused sighting is reported as nothing collected");
+			assertEqual(toasts.length, 0, "and no notice claims a term was collected");
+			assertEqual(store.find("WriteAheadLog"), null, "and the deleted term is still deleted");
+		} finally {
+			layer.detach();
+		}
+	});
+
+	await asyncCheck("interact: auto-collection creates only rare terms, never glossary words or prose", "autoCreatePolicy", async () => {
+		// The policy the user asked for: a rare word the agent used gets an entry, and
+		// everything the plugin can already define, or that is simply ordinary text, does
+		// not. Without this the panel fills with the agent's whole vocabulary.
+		//
+		// Every candidate is deleted first so all three are genuinely NEW to the collector
+		// — otherwise the glossary terms would be skipped as "already known" and the check
+		// would pass without testing the policy at all.
+		const { createInteractionLayer } = loadCore("interact.js");
+		const attempts = [];
+		const world = makeCollectorWorld("the WriteAheadLog and the idempotent handler agree on the quorum");
+		const layer = createInteractionLayer({
+			detector: detectorWith([]),
+			store: {
+				getState: () => ({ entries: [] }),
+				noteSighting: (sighting) => {
+					attempts.push(sighting.term);
+					return { created: true, deleted: false };
+				}
+			},
+			isWordCharacter: (character) => /\w/.test(character),
+			// Permissive on purpose: these checks are about the collector's LOGIC, while the
+			// shipped defaults (no code-shaped names, nothing under four characters) are asserted
+			// in the settings checks. Letting a preference decide the outcome here would hide a
+			// real regression in collection behind a switch.
+			collectSettings: () => ({ collectMinLength: 1, collectIdentifiers: true, collectCjk: true }),
+			logger: { warn: () => {} },
+			onExplain: () => {},
+			onSelection: () => {},
+			onToast: () => {},
+			document: world.document,
+			window: world.window
+		});
+		// `attach()` binds the conversation region, which the snapshot reads from. The
+		// settle timer it schedules fires long after this pass, so `scanNow` still sees the
+		// message and the three candidates are all new.
+		layer.attach();		try {
+			await layer.scanNow();
+			assert(attempts.includes("WriteAheadLog"), `the rare identifier must be collected, saw ${JSON.stringify(attempts)}`);
+			assertEqual(attempts.includes("quorum"), false, "a term the built-in glossary already explains must not be");
+			assertEqual(attempts.includes("idempotent"), false, "nor another term the glossary explains");
+			assertEqual(attempts.includes("the"), false, "and nor ordinary prose");
+		} finally {
+			layer.detach();
+		}
+	});
+
+	await asyncCheck("interact: a deleted rare term is not re-collected from conversation", "deletedNotRecollected", async () => {
+		// The rule the user asked for and the one users will notice: deletion is final for
+		// the COLLECTOR. A rare term still in the transcript must not come back just because
+		// the agent mentioned it again — otherwise a later reply revives it on its own and
+		// the user's deletion quietly undoes itself. The manual paths (selecting the word,
+		// typing in the editor) are unaffected.
+		const { createInteractionLayer } = loadCore("interact.js");
+		const memory = new Map();
+		const storage = {
+			getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+			setItem: (key, value) => memory.set(key, String(value)),
+			removeItem: (key) => memory.delete(key)
+		};
+		const store = createDictionaryStore({
+			local: dictionaryModule.createBrowserStore(storage, { warn: () => {} }),
+			remote: null,
+			logger: { warn: () => {} },
+			now: () => 5000
+		});
+		await store.hydrate();
+		await store.saveEntry("WriteAheadLog", { definition: { gloss: "先写一条。" } });
+		await store.deleteEntry("WriteAheadLog");
+		assertEqual(store.find("WriteAheadLog"), null, "the term is deleted before the transcript is read");
+
+		const attempts = [];
+		const world = makeCollectorWorld("As established, the WriteAheadLog handles it.");
+		const layer = createInteractionLayer({
+			detector: detectorWith([]),
+			store: {
+				getState: () => store.getState(),
+				noteSighting: (sighting) => {
+					attempts.push(sighting.term);
+					return store.noteSighting(sighting);
+				}
+			},
+			isWordCharacter: (character) => /\w/.test(character),
+			// Permissive on purpose: these checks are about the collector's LOGIC, while the
+			// shipped defaults (no code-shaped names, nothing under four characters) are asserted
+			// in the settings checks. Letting a preference decide the outcome here would hide a
+			// real regression in collection behind a switch.
+			collectSettings: () => ({ collectMinLength: 1, collectIdentifiers: true, collectCjk: true }),
+			logger: { warn: () => {} },
+			onExplain: () => {},
+			onSelection: () => {},
+			onToast: () => {},
+			document: world.document,
+			window: world.window
+		});
+		layer.attach();
+		try {
+			const created = await layer.scanNow();
+			assertEqual(created, 0, "a later mention creates nothing");
+			assertEqual(attempts.length, 0, "and the collector does not even ask — a deleted term is skipped outright");
+			assertEqual(store.find("WriteAheadLog"), null, "and it stays deleted");
+			// The manual path is the one that may revive it.
+			await store.saveEntry("WriteAheadLog", { definition: { gloss: "手动加回来的。" } });
+			assert(store.find("WriteAheadLog") !== null, "a deliberate add still revives it");
+			assertEqual(store.find("WriteAheadLog").definition.gloss, "手动加回来的。", "with the text the user gave");
+		} finally {
+			layer.detach();
+		}
+	});
+
+	await asyncCheck("store: a refused sighting writes nothing, a live one still counts", "sightingStore", async () => {
+		const memory = new Map();
+		const storage = {
+			getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+			setItem: (key, value) => memory.set(key, String(value)),
+			removeItem: (key) => memory.delete(key)
+		};
+		const store = createDictionaryStore({
+			local: dictionaryModule.createBrowserStore(storage, { warn: () => {} }),
+			remote: null,
+			logger: { warn: () => {} },
+			now: () => 5000
+		});
+		await store.saveEntry("Refused", { definition: { gloss: "x" } });
+		await store.deleteEntry("Refused");
+		const before = JSON.stringify(dictionaryModule.serializeState(store.getState()));
+		const refused = await store.noteSighting({ term: "Refused" });
+		assertEqual(refused.deleted, true, "the store must report the refusal");
+		assertEqual(refused.created, false, "and report nothing created");
+		assertEqual(JSON.stringify(dictionaryModule.serializeState(store.getState())), before, "and the document must not change");
+
+		await store.saveEntry("Live", { definition: { gloss: "kept" } });
+		const counted = await store.noteSighting({ term: "Live", context: "a sentence" });
+		assertEqual(counted.deleted, false, "a live term is not reported as deleted");
+		assertEqual(store.find("Live").seen, 2, "and its sighting is counted");
+	});
+}
+
+test("dictionary: a record cannot be smuggled in through the tombstone channel", () => {
+	// `entries` are live and `backing` are tombstones, and a record whose own `deletedAt`
+	// contradicts the channel it arrived in is malformed. Both directions are resolved
+	// toward the channel, because the alternative is a payload that carries live content
+	// in the deletion list to slip past the deletion rules.
+	const live = dictionaryModule.editEntry(dictionaryModule.emptyState({ now: 1 }), "q", { definition: { gloss: "mine" } }, { now: 100 }).state;
+	const deleted = dictionaryModule.removeEntry(live, "q", { now: 2000 }).state;
+
+	// A crafted LIVE record in `backing` must not revive the term.
+	const smuggled = dictionaryModule.mergeState(deleted, { backing: [{ term: "q", updatedAt: 9000, source: "user", definition: { gloss: "smuggled" } }] }, { now: 9000 });
+	assertEqual(dictionaryModule.listEntries(smuggled, "", "all").length, 0, "a live record in backing cannot revive");
+	// A crafted TOMBSTONE must not authorise its own revival either, whatever it claims
+	// about when it was written.
+	const selfAuthorised = dictionaryModule.mergeState(deleted, { backing: [{ term: "q", deletedAt: 100, updatedAt: 999999, source: "user", definition: { gloss: "x" } }] }, { now: 9000 });
+	assertEqual(dictionaryModule.listEntries(selfAuthorised, "", "all").length, 0, "a tombstone cannot revive itself");
+	// The legitimate path is untouched: a live crafted record in `entries`, newer than the
+	// deletion, still revives.
+	const proper = dictionaryModule.mergeState(deleted, { entries: [{ term: "q", updatedAt: 9000, source: "user", definition: { gloss: "typed" } }] }, { now: 9000 });
+	assertEqual(dictionaryModule.listEntries(proper, "", "all").length, 1, "a live crafted record in entries still revives");
+	// And a tombstone planted in `entries` is read as the tombstone it claims to be.
+	const planted = dictionaryModule.mergeState(dictionaryModule.emptyState({ now: 1 }), { entries: [{ term: "q", updatedAt: 9000, deletedAt: 500, source: "user", definition: { gloss: "x" } }] }, { now: 9000 });
+	assertEqual(dictionaryModule.listEntries(planted, "", "all").length, 0, "a tombstone in entries stays deleted");
+});
+
+//#endregion
+
+//#region terms
+
+const { TermDetector } = loadCore("terms.js");
+const lexiconEn = existsSync(join(coreDir, "lexicon.en.js")) ? loadCore("lexicon.en.js") : {};
+const lexiconZh = existsSync(join(coreDir, "lexicon.zh.js")) ? loadCore("lexicon.zh.js") : {};
+const stopwordLists = existsSync(join(coreDir, "stopwords.js")) ? loadCore("stopwords.js") : { EN: [], ZH: [] };
+
+/**
+ * Build a detector over the bundled lexicons and an optional user dictionary.
+ * @param entries - user dictionary entries.
+ * @returns the detector.
+ */
+function detectorWith(entries = []) {
+	return new TermDetector({ lexicon: { ...lexiconEn, ...lexiconZh }, entries, stopwords: stopwordLists });
+}
+
+test("terms: the bundled lexicons are non-trivial", () => {
+	assert(Object.keys(lexiconEn).length >= 400, `English lexicon is too small: ${Object.keys(lexiconEn).length}`);
+	assert(Object.keys(lexiconZh).length >= 60, `Chinese lexicon is too small: ${Object.keys(lexiconZh).length}`);
+});
+
+test("terms: the bundled stopword lists are non-trivial", () => {
+	assert(stopwordLists.EN.length >= 300, `English stopword list is too small: ${stopwordLists.EN.length}`);
+	assert(stopwordLists.ZH.length >= 30, `Chinese stopword list is too small: ${stopwordLists.ZH.length}`);
+});
+
+test("terms: a glossary phrase is detected as one hit, not two words", () => {
+	const detector = detectorWith();
+	const text = "We adopted event sourcing for the ledger.";
+	const found = detector.scan(text);
+	const hit = found.find((occurrence) => occurrence.key === "event sourcing");
+	assert(hit !== undefined, `the phrase must be detected, got ${JSON.stringify(found.map((o) => o.key))}`);
+	assertEqual(text.slice(hit.start, hit.end), "event sourcing", "the match covers the whole phrase");
+	assertEqual(found.filter((occurrence) => occurrence.key === "event" || occurrence.key === "sourcing").length, 0, "its words must not be reported separately");
+});
+
+test("terms: a Chinese glossary term is detected inside a longer word", () => {
+	const detector = detectorWith();
+	const found = detector.scan("这个接口需要保证幂等性，避免重复扣款。");
+	assert(
+		found.some((occurrence) => occurrence.key === "幂等" || occurrence.key === "幂等性"),
+		`expected a 幂等 hit, got ${JSON.stringify(found.map((o) => o.key))}`
+	);
+});
+
+test("terms: the user's own entry is matched, not merely remembered", () => {
+	// The regression guard for "已经添加的词条在对话中没有变成词条块".
+	//
+	// `scan` finds occurrences by searching the text for each key in `keys`, and `keys`
+	// was filled ONLY from the lexicon. A collected term that is not also a built-in
+	// glossary word therefore came back as an unknown `identifier` candidate — never
+	// marked in the transcript, never explained on hover, and clicking it offered to
+	// create the entry that already existed. Only entries that happened to be glossary
+	// words (like `quorum`) worked, which is why every test passed.
+	const detector = new TermDetector({
+		lexicon: { quorum: { zh: "法定人数", domain: "系统", gloss: "多数派确认。" } },
+		entries: [{ term: "WriteAheadLog", id: "e1", aliases: ["WAL"] }],
+		stopwords: []
+	});
+	const hit = detector.scan("Call WriteAheadLog before commit.", { includeCandidates: true }).find((occurrence) => occurrence.key === "writeaheadlog");
+	assert(hit !== undefined, "the collected term must be matched at all");
+	assertEqual(hit.source, "dictionary", "and reported as the dictionary's own hit");
+	assertEqual(hit.known, true, "so the transcript treats it as known");
+	const viaAlias = detector.scan("The WAL is flushed.", { includeCandidates: true }).find((occurrence) => occurrence.key === "writeaheadlog");
+	assert(viaAlias !== undefined, "an alias must match too");
+	assertEqual(viaAlias.source, "dictionary", "and resolve to the entry");
+	// The two sources stay distinguishable, which is what the marking and the click route on.
+	assertEqual(detector.scan("The quorum decides.", { includeCandidates: true })[0].source, "glossary", "a built-in term stays a glossary hit");
+});
+
+test("terms: a known dictionary term outranks the glossary", () => {
+	const detector = detectorWith([{ term: "quorum", id: "custom", definition: { gloss: "我的解释" } }]);
+	const found = detector.scan("A quorum is required.");
+	const hit = found.find((occurrence) => occurrence.key === "quorum");
+	assert(hit !== undefined, "the term must be detected");
+	assertEqual(hit.source, "dictionary", "the user dictionary answers first");
+	assertEqual(hit.id, "custom", "the user entry's id is used");
+});
+
+test("terms: identifier spelling is noticed without any dictionary", () => {
+	const detector = detectorWith([]);
+	const found = detector.scan("Call runInTransaction before you commit.");
+	assert(
+		found.some((occurrence) => occurrence.term === "runInTransaction" && occurrence.source === "identifier"),
+		`expected an identifier hit, got ${JSON.stringify(found.map((o) => o.term))}`
+	);
+});
+
+test("terms: ordinary prose is not flagged", () => {
+	const detector = detectorWith();
+	const found = detector.scan("The user said the file is in the folder and the value is small.");
+	const flagged = found.filter((occurrence) => !occurrence.known);
+	assertEqual(flagged.length, 0, `ordinary words must not be candidates, got ${JSON.stringify(flagged.map((o) => o.term))}`);
+});
+
+test("terms: a substring inside a longer word is not a hit", () => {
+	const detector = detectorWith([{ term: "act" }]);
+	const found = detector.scan("The interaction was long.");
+	assertEqual(found.filter((occurrence) => occurrence.key === "act").length, 0, "act must not match inside interaction");
+});
+
+test("terms: matches never overlap", () => {
+	const detector = detectorWith();
+	const found = detector.scan("Event sourcing and eventual consistency both matter.");
+	for (let index = 1; index < found.length; index++) {
+		assert(found[index].start >= found[index - 1].end, `overlapping matches: ${JSON.stringify(found.slice(index - 1, index + 1))}`);
+	}
+});
+
+test("terms: bestCandidate prefers the strongest unknown evidence", () => {
+	const detector = detectorWith();
+	const best = detector.bestCandidate("We rely on itsBackpressure handling.");
+	assert(best !== null, "a candidate must be found");
+	assertEqual(best.occurrence.term, "itsBackpressure", "the identifier wins");
+});
+
+//#endregion
+
+//#region bundle
+
+test("bundle: the generated browser half loads and registers the plugin", () => {
+	const { slots, localeRegistrations } = loadBundle();
+	assertEqual(slots.includes("sidebar.panellist"), true, "the panel row slot must be injected");
+	assertEqual(slots.includes("main"), true, "the center panel slot must be injected");
+	assertEqual(slots.includes("shell.overlay"), true, "the overlay slot must be injected");
+	assert(localeRegistrations.some((entry) => entry.ns === "termDictionary"), "the plugin must register its dictionaries");
+});
+
+test("bundle: the bundle id matches the package name", () => {
+	const pkg = JSON.parse(readFileSync(join(pluginDir, "package.json"), "utf8"));
+	const { sandbox } = loadBundle();
+	assert(sandbox !== null, "the bundle evaluated");
+	assert(pkg.name === "dsh-plugin-term-dictionary", "package name");
+});
+
+test("bundle: the shell's views render without throwing", () => {
+	const { registered } = loadBundle();
+	const panel = registered.find((options) => options.name === "main");
+	assert(panel !== undefined, "the main slot registration must be captured");
+	assert(typeof panel.inject === "function", "the panel registration must declare its injected face");
+	const face = panel.inject();
+	assert(face !== null && typeof face === "object" && typeof face.store?.getSnapshot === "function", "the panel must receive the dictionary store");
+});
+
+test("bundle: every registered surface carries the localization and identity the slot needs", () => {
+	const { registered } = loadBundle();
+	const row = registered.find((options) => options.name === "sidebar.panellist");
+	assert(row !== undefined, "the sidebar row must be registered");
+	assertEqual(row.id, "term-dictionary", "the panel id is what the layout selects");
+	assert(typeof row.order === "number", "the row needs an order");
+	assertEqual(typeof row.label, "function", "the row label is a thunk so it follows the locale");
+	const overlay = registered.find((options) => options.name === "shell.overlay");
+	assert(overlay !== undefined, "the overlay must be registered");
+	assertEqual(overlay.id, "term-dictionary-overlay", "the overlay id");
+});
+
+test("bundle: the panel follows a reveal command to the entry it names", () => {
+	// The gesture contract: clicking a term the dictionary already holds must show the
+	// entry, not open a blank editor over it. The shell writes the reveal on the bus,
+	// and this renders the panel the slot would render, watching what it decides.
+	const sets = [];
+	const react = makeReactStub({ onSet: (value) => sets.push(value) });
+	const { registered, components } = loadBundle({ react });
+	const index = registered.findIndex((options) => options.name === "main");
+	assert(index >= 0, "the main slot registration must be captured");
+	const face = registered[index].inject();
+	face.bus.requestFocus("quorum");
+	const component = components[index];
+	assertEqual(typeof component, "function", "the panel component must be captured");
+	component({ ...face, t: (key) => key });
+	assert(sets.includes("quorum"), `the panel must reveal the named entry, saw ${JSON.stringify(sets)}`);
+	// The editor drafts an object carrying `isNew`; a reveal must not produce one.
+	const openedEditor = sets.some((value) => value !== null && typeof value === "object" && "isNew" in value);
+	assertEqual(openedEditor, false, "revealing an existing entry must not open the editor");
+	assertEqual(face.bus.consumeFocus(), null, "the panel acknowledges the command by consuming it");
+});
+
+test("settings: defaults, persistence, and a storage that refuses", () => {
+	const { createSettingsStore, SETTINGS_KEY, DEFAULT_SETTINGS } = loadCore("settings.js");
+	const memory = () => ({
+		map: new Map(),
+		getItem(key) {
+			return this.map.has(key) ? this.map.get(key) : null;
+		},
+		setItem(key, value) {
+			this.map.set(key, String(value));
+		}
+	});
+	const storage = memory();
+	const store = createSettingsStore({ storage });
+	assertEqual(store.getSnapshot(), DEFAULT_SETTINGS, "unset switches fall back to the defaults");
+	const first = store.getSnapshot();
+	store.set("autoCollect", false);
+	assertEqual(store.getSnapshot().autoCollect, false, "a switch flips");
+	assert(store.getSnapshot() !== first, "and the snapshot identity changes, which is what re-renders the panel");
+	assert(store.getSnapshot() === store.getSnapshot(), "but is stable between changes");
+	assertEqual(createSettingsStore({ storage }).getSnapshot().autoCollect, false, "the switch persists under its own key");
+	assert(storage.getItem(SETTINGS_KEY) !== null, "and is written there");
+	store.set("nonsense", true);
+	assertEqual(store.getSnapshot().nonsense, undefined, "an unknown switch is ignored rather than stored");
+	// A storage that refuses must not take the panel down with it: the switches still work
+	// for this session, and the defaults are what a fresh store starts from.
+	const hostile = {
+		getItem() {
+			throw new Error("denied");
+		},
+		setItem() {
+			throw new Error("denied");
+		}
+	};
+	const fallback = createSettingsStore({ storage: hostile, logger: { warn: () => {} } });
+	assertEqual(fallback.getSnapshot(), DEFAULT_SETTINGS, "an unusable storage yields the defaults");
+	fallback.set("autoExplain", false);
+	assertEqual(fallback.getSnapshot().autoExplain, false, "and the switch still works in memory");
+});
+
+test("dictionary: a revived entry survives a merge with the copy that still has the tombstone", () => {
+	// "Retract from the blacklist" only means something if it survives the next sync. A revival is
+	// decided by one comparison in the merge — a CRAFTED record strictly newer than the deletion —
+	// so the two ways to get this wrong are inheriting a non-crafted source and not being newer.
+	const { emptyState, editEntry, removeEntry, reviveEntry, listEntries, mergeState, findEntry } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	state = editEntry(state, "Quorum", { definition: { zh: "法定人数", gloss: "g" } }, { now: 2 }).state;
+	const removed = removeEntry(state, "Quorum", { now: 5 });
+	assertEqual(listEntries(removed.state).length, 0, "the entry is gone to every reader");
+	assertEqual(findEntry(removed.state, "Quorum"), undefined, "and invisible by lookup");
+
+	const revived = reviveEntry(removed.state, "Quorum", { now: 10 });
+	assertEqual(revived.revived, true, "the revival reports what it did");
+	assertEqual(listEntries(revived.state).map((entry) => entry.term), ["Quorum"], "and the entry is live again");
+	assertEqual(revived.state.backing.length, 0, "the tombstone leaves `backing`, so nothing can weigh it a second time");
+	assertEqual(revived.state.deletedKeys.length, 0, "and its key leaves the deletion list");
+
+	// The whole point: merge with the copy that predates the revival and still carries the tombstone.
+	const merged = mergeState(revived.state, removed.state, { now: 11 });
+	assertEqual(listEntries(merged).map((entry) => entry.term), ["Quorum"], "the revival survives a union merge with the older tombstone");
+	assertEqual(findEntry(merged, "Quorum").source, "user", "because a revival IS user intent, which is the only thing that outweighs a deletion");
+
+	// The three no-ops, so a caller can press the button twice without inventing state.
+	assertEqual(reviveEntry(revived.state, "Quorum", { now: 12 }).revived, false, "reviving a live entry does nothing");
+	assertEqual(reviveEntry(removed.state, "Never heard of it", { now: 12 }).revived, false, "and so does reviving a term that was never here");
+
+	// A revival stamped before the deletion must still win: the clock is not the authority, intent
+	// plus a strictly newer stamp is — and `+1` is what supplies the "strictly".
+	const early = reviveEntry(removed.state, "Quorum", { now: 0 });
+	assertEqual(listEntries(early.state).length, 1, "a revival whose clock is behind the deletion still revives");
+	assertEqual(
+		listEntries(mergeState(early.state, removed.state, { now: 11 })).length,
+		1,
+		"and it survives the merge too, which is where a naive `now` would have lost"
+	);
+});
+
+test("dictionary: the deleted list shows the tombstones, newest deletion first", () => {
+	// "Retract from the blacklist" needs a blacklist to look at. Tombstones ride in `backing` and are
+	// invisible to every ordinary reader — including `listEntries`, which is exactly why the deleted
+	// view is a different LIST rather than one more predicate over the same one.
+	const { emptyState, editEntry, removeEntry, reviveEntry, listDeleted, listEntries } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	state = editEntry(state, "Quorum", { definition: { gloss: "g" } }, { now: 2 }).state;
+	state = editEntry(state, "Entropy", { definition: { gloss: "g" } }, { now: 3 }).state;
+	state = editEntry(state, "Live one", { definition: { gloss: "g" } }, { now: 4 }).state;
+	const firstGone = removeEntry(state, "Quorum", { now: 10 }).state;
+	const twoGone = removeEntry(firstGone, "Entropy", { now: 20 }).state;
+
+	assertEqual(listEntries(twoGone).map((entry) => entry.term), ["Live one"], "the ordinary list never shows a tombstone");
+	assertEqual(listDeleted(twoGone).map((entry) => entry.term), ["Entropy", "Quorum"], "the deleted list shows them, newest deletion first");
+	assertEqual(listDeleted(twoGone, "quo").map((entry) => entry.term), ["Quorum"], "and it is searchable like the other one");
+	assertEqual(listDeleted(emptyState({ now: 1 })), [], "a document with no deletions lists nothing");
+
+	// Reviving is the whole interaction: the row leaves one list and rejoins the other.
+	const back = reviveEntry(twoGone, "Quorum", { now: 30 }).state;
+	assertEqual(listDeleted(back).map((entry) => entry.term), ["Entropy"], "a revived entry leaves the deleted list");
+	assert(listEntries(back).some((entry) => entry.term === "Quorum"), "and is live in the ordinary one again");
+});
+
+test("style: the notice that covers the composer does not eat clicks", () => {
+	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
+	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
+	// rectangle for that whole time, so deleting an entry, importing, exporting or clearing the
+	// dictionary left the input box unusable, which reads as a broken app rather than as a notice.
+	//
+	// Asserted on the style rather than through a rendered tree, because that is the whole of the bug:
+	// a fixed, top-most, interactive-by-default box sitting over the input.
+	const { applyStyles } = loadCore("styles.js");
+	assertEqual(applyStyles.toast.pointerEvents, "none", "the notice must let pointers through");
+	assertEqual(applyStyles.toast.position, "fixed", "and the fixed, bottom-centre one is the one that was the problem");
+	assert(applyStyles.toast.zIndex > 0, "it sits above everything, so this was never a hypothetical overlap");
+});
+
+test("dictionary: clearing everything keeps what the user pinned", () => {
+	// Pinning is how a reader says "this one, never mind the noise". A bulk clear that swept the
+	// pinned entries up deleted exactly the ones that had been singled out — the opposite of what a
+	// pin is for — and the confirmation did not say so, which made it a trap rather than a bug the
+	// user could see coming.
+	const { emptyState, editEntry, clearAll, listEntries } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	state = editEntry(state, "Quorum", { definition: { zh: "法定人数", gloss: "g" } }, { now: 2 }).state;
+	state = editEntry(state, "Entropy", { definition: { zh: "熵", gloss: "g" } }, { now: 3 }).state;
+	state = editEntry(state, "Pinned one", { definition: { gloss: "keep me" }, pinned: true }, { now: 4 }).state;
+	assertEqual(listEntries(state).length, 3, "three entries to start with");
+
+	const cleared = clearAll(state, { now: 5 });
+	assertEqual(listEntries(cleared.state).map((entry) => entry.term), ["Pinned one"], "the pinned entry survives the bulk clear");
+	assertEqual(cleared.removed, 2, "and the count reported is what was deleted, not how many existed");
+
+	// Clearing twice is not a way to get the pinned one after all: it stays.
+	assertEqual(listEntries(clearAll(cleared.state, { now: 6 }).state).map((entry) => entry.term), ["Pinned one"], "a second clear does not take it either");
+	assertEqual(clearAll(cleared.state, { now: 6 }).removed, 0, "and reports nothing deleted");
+
+	// The survivors are still pinned, so the property that saved them is intact rather than consumed.
+	assertEqual(listEntries(cleared.state)[0].pinned, true, "the survivor is still pinned");
+
+	// The deleted ones are tombstoned, exactly as a single deletion would leave them: without that,
+	// the next union merge restores them from the other side. Tombstones live in `backing` (with
+	// their keys announced in `deletedKeys`), not as `deletedAt` on a live record — asserting the
+	// wrong one of those two shapes is how this check first failed.
+	const restored = clearAll(state, { now: 5 }).state;
+	assertEqual(restored.deletedKeys.slice().sort(), ["entropy", "quorum"], "the deleted keys are announced, which is what stops a union merge restoring them");
+	assertEqual(restored.backing.length, 2, "and the tombstones themselves ride in backing");
+});
+
+test("transfer: the file's scope, and the three fates an imported entry can meet", () => {
+	// Every decision the import/export feature is made of lives in `transfer.js`, which is pure — so
+	// it is checked here rather than through a browser. The interesting ones are the refusals: an
+	// export of "categories" that selects none, and an import that meets an entry the user deleted.
+	const { buildExport, parseImport, planImport, domainsIn } = loadCore("transfer.js");
+	const entries = [
+		{ term: "Quorum", key: "quorum", domain: "分布式", definition: { zh: "法定人数", gloss: "g" }, seen: 7, lastSeenAt: 123, pinned: true },
+		{ term: "Idempotent", key: "idempotent", domain: "分布式", definition: { zh: "幂等", gloss: "g" } },
+		{ term: "Entropy", key: "entropy", domain: "信息论", definition: { zh: "熵", gloss: "g" } },
+		{ term: "Loose", key: "loose", domain: "", definition: { gloss: "g" } }
+	];
+
+	// A category IS the entry's domain, so the checklist comes from the data.
+	assertEqual(domainsIn(entries), [{ domain: "分布式", count: 2 }, { domain: "信息论", count: 1 }], "categories, most-populated first, and never a blank one");
+
+	const all = buildExport(entries, { scope: "all" }, 42);
+	assertEqual([all.kind, all.version, all.scope, all.exportedAt], ["dsh-term-dictionary", 1, "all", 42], "the envelope identifies itself and is stamped deterministically");
+	assertEqual(all.entries.length, 4, "everything means everything");
+	assertEqual(all.entries[0].pinned, true, "pinning travels, because it is the user's judgement");
+	assertEqual(["seen" in all.entries[0], "lastSeenAt" in all.entries[0]], [false, false], "local history does not: a file must not claim a term was seen here");
+
+	const picked = buildExport(entries, { scope: "domains", domains: ["信息论"] }, 42);
+	assertEqual(picked.entries.map((entry) => entry.term), ["Entropy"], "by category selects only that category");
+	assertEqual(picked.domains, ["信息论"], "and records what was asked for");
+	// Selecting no category is a statement, not a request for the whole dictionary.
+	assertEqual(buildExport(entries, { scope: "domains", domains: [] }, 42).entries.length, 0, "no categories chosen exports nothing, not everything");
+
+	// Reading a file: the envelope this plugin writes, a bare array, and a wrapper — all acceptable,
+	// because a hand-made list is still a list.
+	const written = JSON.stringify(buildExport(entries, { scope: "all" }, 42));
+	assertEqual(parseImport(written).entries.length, 4, "our own export round-trips");
+	assertEqual(parseImport('[{"term":"Solo","definition":{"gloss":"g"}}]').entries.length, 1, "a bare array is a dictionary too");
+	assertEqual(parseImport('{"entries":[{"term":"Wrapped"}]}').entries.length, 1, "and so is an object that only has entries");
+	assertEqual(parseImport("not json at all"), { ok: false, error: "not-json" }, "garbage is refused with a reason");
+	assertEqual(parseImport('{"entries":[]}'), { ok: false, error: "no-usable-entries" }, "and so is a file with nothing usable in it");
+	const mixed = parseImport('[{"term":"Good"},{"term":""},{"nope":1}]');
+	assertEqual([mixed.entries.length, mixed.skipped], [1, 2], "records without a term are counted as skipped, not imported as blanks");
+
+	// The policy, which is the whole point: take what is new, leave alone what exists, and never
+	// revive what the user deleted.
+	const plan = planImport(
+		[{ key: "quorum" }],
+		[
+			{ term: "Quorum", key: "quorum" },
+			{ term: "Idempotent", key: "idempotent" },
+			{ term: "Entropy", key: "entropy" },
+			{ term: "Idempotent again", key: "idempotent" }
+		],
+		new Set(["entropy"])
+	);
+	assertEqual(plan.accepted.map((entry) => entry.term), ["Idempotent"], "only the genuinely new entry is taken");
+	assertEqual(plan.existing.map((entry) => entry.term), ["Quorum"], "an entry already here is left as it is");
+	assertEqual(plan.deleted.map((entry) => entry.term), ["Entropy"], "an entry the user deleted stays deleted — a file is not a reason to undo that");
+	assertEqual(plan.duplicates, 1, "and a key repeated inside the file collapses to one");
+	assertEqual(planImport([], [{ key: "a" }, { key: "a" }], new Set()).accepted.length, 1, "a file that repeats itself imports the entry once");
+
+	// ... and the one thing that overrides the deletion rule: the user asking for it.
+	//
+	// A tombstone IS the user's decision, so an import may only overturn it on request — never by
+	// merely containing the term. Asked for, those entries move into `accepted` (the caller's write
+	// list) and the bucket is then genuinely empty, so the report's "0 you deleted" stays true
+	// instead of quietly changing meaning.
+	const optedIn = planImport(
+		[{ key: "quorum" }],
+		[{ term: "Quorum", key: "quorum" }, { term: "Entropy", key: "entropy" }],
+		new Set(["entropy"]),
+		{ includeDeleted: true }
+	);
+	assertEqual(optedIn.accepted.map((entry) => entry.term), ["Entropy"], "opting in is the only way a deleted entry is taken");
+	assertEqual(optedIn.deleted, [], "and it is then not also reported as skipped");
+	assertEqual(optedIn.existing.map((entry) => entry.term), ["Quorum"], "while the entry already here is still left alone");
+	assertEqual(planImport([], [{ term: "Entropy", key: "entropy" }], new Set(["entropy"]), { includeDeleted: false }).accepted.length, 0, "the option has to be stated, not merely defaulted away from");
+
+	// Provenance is the store's to stamp. A file that claimed `source: "auto"` would produce an
+	// entry the merge does not count as intent — collected by itself and therefore droppable — so the
+	// import must not read it: the entry is created by the user's own action and is a `user` record.
+	assertEqual("source" in parseImport('[{"term":"Solo","source":"auto"}]').entries[0], false, "an imported record carries no source claim");
+	assertEqual(parseImport('[{"term":"Solo"}]').entries[0].pinned, false, "and an absent pin is false, not undefined");
+});
+
+test("hover: the caret decides which marked term is under the pointer", () => {
+	// The hit test the pointer layer replaced its own matcher with: a caret is a `(node, offset)`
+	// pair, and a marked occurrence is stored in the same coordinates, so this is a lookup rather
+	// than a second text walk. These are the cases the retired `ranges:` checks covered — the ones
+	// that still describe live behaviour, on the module that now owns it.
+	const { createHoverLayer } = loadCore("hover.js");
+	const alpha = { nodeType: 3, nodeValue: "alpha beta", parentElement: null, childNodes: [] };
+	const other = { nodeType: 3, nodeValue: "elsewhere", parentElement: null, childNodes: [] };
+	const parent = { nodeType: 1, nodeValue: null, childNodes: [alpha], parentElement: null };
+	const segments = [
+		{ node: alpha, start: 0, end: 5, term: "alpha", key: "alpha", id: "" },
+		{ node: alpha, start: 6, end: 10, term: "beta", key: "beta", id: "" }
+	];
+	/** Where the caret is reported, so one layer can be asked many questions. */
+	let caret = { startContainer: alpha, startOffset: 2 };
+	const layer = createHoverLayer({
+		document: { caretRangeFromPoint: () => caret, createRange: () => ({ setStart: () => {}, setEnd: () => {} }) },
+		segments: () => segments,
+		disposers: []
+	});
+
+	assertEqual(layer.matchAt(0, 0)?.key, "alpha", "a caret inside a marked term matches it");
+	caret = { startContainer: alpha, startOffset: 0 };
+	assertEqual(layer.matchAt(0, 0)?.key, "alpha", "including at its first character");
+	// Offset 5 is the END of "alpha" and offset 6 the START of "beta"; the space between belongs to
+	// neither, and a caret exactly on a term's trailing edge belongs to that term.
+	caret = { startContainer: alpha, startOffset: 6 };
+	assertEqual(layer.matchAt(0, 0)?.key, "beta", "a caret on a boundary belongs to the term starting there");
+	caret = { startContainer: alpha, startOffset: 5 };
+	assertEqual(layer.matchAt(0, 0)?.key, "alpha", "and the term ending there owns its own last offset");
+	caret = { startContainer: other, startOffset: 2 };
+	assertEqual(layer.matchAt(0, 0), null, "a caret in another node matches nothing");
+	caret = { startContainer: parent, startOffset: 0 };
+	assertEqual(layer.matchAt(0, 0)?.key, "alpha", "a caret on an element resolves into the text that follows it");
+	caret = null;
+	assertEqual(layer.matchAt(0, 0), null, "and no caret at all matches nothing");
+});
+
+test("settings: a delay is clamped into range instead of trusted", () => {
+	// A slider and a text box feed the same setter, so `"120"`, `120.4` and `5000` all arrive here.
+	// A delay outside the range is a worse outcome than the nearest valid one, and the store is
+	// where that rule lives — not in two places, one per input.
+	const { normalizeSettings, HOVER_DELAY_MIN, HOVER_DELAY_MAX, DEFAULT_SETTINGS } = loadCore("settings.js");
+	assertEqual([HOVER_DELAY_MIN, HOVER_DELAY_MAX], [0, 200], "the range the slider and the box advertise");
+	assertEqual(normalizeSettings({ hoverInMs: 5000 }).hoverInMs, 200, "above the range clamps to the top");
+	assertEqual(normalizeSettings({ hoverInMs: -5 }).hoverInMs, 0, "and below it to the bottom");
+	assertEqual(normalizeSettings({ hoverInMs: 120.4 }).hoverInMs, 120, "a fraction is rounded, not stored");
+	assertEqual(normalizeSettings({ hoverInMs: "130" }).hoverInMs, 130, "a number typed into the box arrives as a string");
+	assertEqual(normalizeSettings({ hoverInMs: "later" }).hoverInMs, DEFAULT_SETTINGS.hoverInMs, "and a non-number falls back");
+	assertEqual(normalizeSettings({}).hoverOutMs, 0, "the exit delay defaults to zero: a lingering card reads as lag");
+	assertEqual(normalizeSettings({ hoverOutMs: 999 }).hoverOutMs, 200, "and it obeys the same range");
+});
+
+test("settings: an unknown stored choice falls back instead of reaching the prompt builder", () => {
+	// The host builds the instruction from `lang` and `depth` and only has branches for the
+	// values this store accepts. A hand-edited record, or one written by an older build, must
+	// not be able to put a third value in there — so the store normalizes what it READ, not
+	// only what it is handed through `set`.
+	const { createSettingsStore, normalizeSettings } = loadCore("settings.js");
+	const read = (raw) => ({
+		map: new Map([["dsh-plugin-term-dictionary:settings:v1", JSON.stringify(raw)]]),
+		getItem(key) {
+			return this.map.has(key) ? this.map.get(key) : null;
+		},
+		setItem() {}
+	});
+	const store = createSettingsStore({ storage: read({ explainLang: "klingon", explainDepth: "essay", explainParagraph: "yes" }) });
+	assertEqual(store.getSnapshot().explainLang, "auto", "an unknown language falls back to following the UI");
+	assertEqual(store.getSnapshot().explainDepth, "normal", "an unknown depth falls back to normal");
+	assertEqual(store.getSnapshot().explainParagraph, true, "and a non-boolean flag falls back to its default");
+	// Writing a value the store does not know must not land either.
+	store.set("explainLang", "klingon");
+	assertEqual(store.getSnapshot().explainLang, "auto", "set() normalizes too");
+	assertEqual(normalizeSettings({ explainLang: "en", explainDepth: "brief" }).explainDepth, "brief", "and a known value survives");
+});
+
+test("panel: clicking anywhere on an entry block opens it, and its own buttons do not", () => {
+	// The row used to be inert except for its name, so "the entry block does not respond" was the
+	// reader's experience. The fix is a click on the block — and the guard that matters is the
+	// OTHER half: pin, edit and delete are buttons inside that block, and their clicks must not
+	// also open the editor behind them.
+	const sets = [];
+	const react = makeReactStub({ onSet: (value) => sets.push(value) });
+	const bundle = loadBundle({ react });
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	assert(index >= 0, "the main slot registration must be captured");
+	const face = bundle.registered[index].inject();
+	face.store.noteSighting({ term: "Quorum", context: "A quorum decides." });
+	const tree = bundle.components[index]({ ...face, t: (key) => key });
+
+	/** Every row the panel rendered, found by the marker the pointer layer also reads. */
+	const rows = [];
+	const walk = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		if (typeof node.props?.["data-term-entry"] === "string") rows.push(node);
+		walk(node.props?.children);
+	};
+	walk(tree);
+	assertEqual(rows.length, 1, "the entry must be rendered as one block");
+	const row = rows[0];
+	assert(typeof row.props.onClick === "function", "the block itself must be clickable");
+
+	row.props.onClick({ target: { closest: () => null } });
+	assert(sets.length > 0, "clicking the block must open the entry");
+
+	const before = sets.length;
+	row.props.onClick({ target: { closest: (selector) => (selector === "button" ? {} : null) } });
+	assertEqual(sets.length, before, "a click on one of the block's own buttons must not also open the editor");
+});
+
+test("panel: the settings page renders every preference and changes the store", () => {
+	// The preferences used to be a row of chips in the panel; they are a page of their own now,
+	// reachable from the header. This drives that page directly through the bundle's test seam,
+	// and separately asserts the two halves of the decision: the page is where the controls are,
+	// and the entry list no longer carries them.
+	const sets = [];
+	const react = makeReactStub({ onSet: (value) => sets.push(value) });
+	const bundle = loadBundle({ react });
+	assert(typeof bundle.exports.settingsPage === "function", "the settings page must be reachable for checks");
+	const { createSettingsStore } = loadCore("settings.js");
+	const store = createSettingsStore({ storage: null });
+	const setSwitch = (key, value) => store.set(key, value);
+	const page = bundle.exports.settingsPage({ settings: store.getSnapshot(), setSwitch, t: (key, values) => `${key}${values?.count === undefined ? "" : `:${values.count}`}` });
+
+	/** Collect the two control shapes: switches and the option bars. */
+	const switches = [];
+	const bars = [];
+	const fields = [];
+	const walk = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		if (typeof node.props?.onToggle === "function") switches.push(node);
+		// Collected by its setter, the same way the switches are: `options` and the label live on
+		// the OptionBar element itself, while `role="radiogroup"` is on the div it returns.
+		if (typeof node.props?.onSelect === "function") bars.push(node);
+		// The third shape. Collected by `onChange` for the same reason: the slider and the box live
+		// inside DelayField, while the value, the bounds and the setter are on its own element.
+		if (typeof node.props?.onChange === "function") fields.push(node);
+		walk(node.props?.children);
+	};
+	walk(page);
+
+	// Eleven preferences, and the control each one's VALUE SHAPE calls for: two states get a switch,
+	// a few named choices get an option bar, and a number in a range gets a slider plus a box.
+	assertEqual(switches.length, 6, "six switches: collect, annotate, explain, paragraph, code names, Chinese terms");
+	assertEqual(bars.length, 3, "three option bars: language, depth, minimum length");
+	assertEqual(bars.map((bar) => bar.props.options.length), [3, 3, 5], "each bar shows every one of its values");
+	assertEqual(fields.length, 2, "two delay fields: the hover entry delay and the hover exit delay");
+	assertEqual(
+		fields.map((field) => [field.props.min, field.props.max]),
+		[[0, 200], [0, 200]],
+		"both bounded to 0-200ms, which is what the slider and the box advertise"
+	);
+	fields[0].props.onChange(150);
+	assertEqual(store.getSnapshot().hoverInMs, 150, "the entry-delay field reaches the store");
+	fields[1].props.onChange(40);
+	assertEqual(store.getSnapshot().hoverOutMs, 40, "and so does the exit-delay field");
+	// Each control is named by the PREFERENCE, and the state rides on the control instead of in the
+	// name. (The `role`/`aria-checked` that report it live inside these components — asserted by
+	// the components' own shape, not reachable from the element that SettingsPage builds.)
+	for (const control of switches) {
+		assert(typeof control.props.title === "string" && control.props.title !== "", "every switch must be named by its preference");
+		assert(typeof control.props.checked === "boolean", "and carry its state as a boolean");
+	}
+	for (const bar of bars) {
+		assert(typeof bar.props.label === "string" && bar.props.label !== "", "every option bar must be named by its preference");
+	}
+	assertEqual(switches[0].props.title, "autoDetectOn", "the switch is named by the preference, not by its state");
+	switches[0].props.onToggle();
+	assertEqual(store.getSnapshot().autoCollect, false, "turning the first switch off reaches the store");
+	switches[3].props.onToggle();
+	assertEqual(store.getSnapshot().explainParagraph, false, "and the paragraph preference reaches the store too");
+	assertEqual(store.getSnapshot().collectIdentifiers, false, "code names are off by default");
+	switches[4].props.onToggle();
+	assertEqual(store.getSnapshot().collectIdentifiers, true, "and that switch turns them on");
+	assertEqual(store.getSnapshot().collectCjk, true, "Chinese terms are on by default");
+
+	const langBar = bars.find((bar) => bar.props.label === "explainLangName");
+	const depthBar = bars.find((bar) => bar.props.label === "explainDepthName");
+	const lengthBar = bars.find((bar) => bar.props.label === "collectMinLengthName");
+	assert(langBar !== undefined && depthBar !== undefined && lengthBar !== undefined, "all three option bars must be reachable by name");
+	assertEqual(langBar.props.options.map((option) => option.value), ["auto", "zh", "en"], "the language bar offers every language");
+	assertEqual(langBar.props.options.length, 3, "and offers one option per value");
+	langBar.props.onSelect("zh");
+	assertEqual(store.getSnapshot().explainLang, "zh", "choosing an option reaches the store directly, not by cycling past it");
+	depthBar.props.onSelect("detailed");
+	assertEqual(store.getSnapshot().explainDepth, "detailed", "the depth bar too");
+	lengthBar.props.onSelect(6);
+	assertEqual(store.getSnapshot().collectMinLength, 6, "and the length bar takes a number, which the cycling control could not");
+
+	// The entry list no longer renders any of them, and carries the entry to the page instead.
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	const face = bundle.registered[index].inject();
+	const listTree = bundle.components[index]({ ...face, t: (key) => key });
+	const listSwitches = [];
+	const listCycles = [];
+	const gather = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) gather(child);
+			return;
+		}
+		if (typeof node.props?.onToggle === "function") listSwitches.push(node);
+		if (typeof node.props?.onCycle === "function") listCycles.push(node);
+		gather(node.props?.children);
+	};
+	gather(listTree);
+	assertEqual(listSwitches.length + listCycles.length, 0, "the entry list must not carry the preferences any more");
+	assert(sets.length >= 0, "the panel's own state is the only thing the entry list changes");
+});
+
+test("panel: the deleted view is behind its own tab, which the ordinary list does not show", () => {
+	// The way IN to the blacklist, and the reason a way in is needed: a tombstone is invisible to the
+	// ordinary list — that is the whole point of one — so without this tab a term deleted by a
+	// mis-aimed click could never be seen again, let alone brought back.
+	const sets = [];
+	const react = makeReactStub({ onSet: (value) => sets.push(value) });
+	const bundle = loadBundle({ react });
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	assert(index >= 0, "the main slot registration must be captured");
+	const face = bundle.registered[index].inject();
+	void face.store.saveEntry("Quorum", { definition: { gloss: "g" } });
+	void face.store.saveEntry("Entropy", { definition: { gloss: "g" } });
+	void face.store.deleteEntry("Entropy");
+	const tree = bundle.components[index]({ ...face, t: (key) => key });
+
+	/** Every node the walk can name, by the marker it carries. */
+	const found = { tabs: [], live: [], deleted: [] };
+	const walk = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		if (node.props?.role === "tab") found.tabs.push(node);
+		if (typeof node.props?.["data-term-entry"] === "string") found.live.push(node);
+		if (typeof node.props?.["data-term-deleted"] === "string") found.deleted.push(node);
+		walk(node.props?.children);
+	};
+	walk(tree);
+
+	assertEqual(found.live.length, 1, "the ordinary list shows the live entry");
+	assertEqual(found.deleted.length, 0, "and not the deleted one, which is what makes the tab necessary");
+	assertEqual(found.tabs.map((tab) => tab.props.children), ["filterAll", "filterUnexplained", "filterPinned", "filterDeleted"], "four views, the deleted one last");
+
+	found.tabs[3].props.onClick();
+	assert(sets.includes("deleted"), `the tab must select the deleted view, saw ${JSON.stringify(sets)}`);
+});
+
+test("panel: the deleted view renders the tombstones and its 撤回 control names the term", () => {
+	// The view itself, rendered through the bundle's test seam. Three things are asserted because
+	// three things can go wrong in a row: the term, WHICH deletion it is (a list of identical rows is
+	// useless), and the one control.
+	const sets = [];
+	const react = makeReactStub({ onSet: (value) => sets.push(value) });
+	const bundle = loadBundle({ react });
+	assert(typeof bundle.exports.deletedList === "function", "the deleted view must be reachable for checks");
+	const t = (key, values) => (values === undefined ? key : `${key}:${JSON.stringify(values)}`);
+	const revived = [];
+	const page = bundle.exports.deletedList({ entries: [{ id: "id-1", term: "Entropy", key: "entropy", deletedAt: 20261009 }], t, onRevive: (entry) => revived.push(entry) });
+
+	const rows = [];
+	const buttons = [];
+	const walk = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child);
+			return;
+		}
+		if (typeof node.props?.["data-term-deleted"] === "string") rows.push(node);
+		if (node.props?.label === "revive" && typeof node.props.onClick === "function") buttons.push(node);
+		walk(node.props?.children);
+	};
+	walk(page);
+
+	assertEqual(rows.length, 1, "one row per tombstone");
+	const text = [];
+	const gather = (node) => {
+		if (typeof node === "string" || typeof node === "number") text.push(String(node));
+		else if (Array.isArray(node)) node.forEach(gather);
+		else if (node !== null && typeof node === "object") gather(node.props?.children);
+	};
+	gather(rows[0]);
+	assert(text.includes("Entropy"), `the row must name the term, saw ${JSON.stringify(text)}`);
+	assert(text.some((part) => part.startsWith("deletedAt")), `and say when it was deleted, saw ${JSON.stringify(text)}`);
+	assertEqual(buttons.length, 1, "and carry exactly one way back");
+	buttons[0].props.onClick();
+	assertEqual(revived.map((entry) => entry.id), ["id-1"], "which hands the row's own entry to the caller");
+
+	// Nothing deleted is a state, not an empty list: it says so.
+	const blank = bundle.exports.deletedList({ entries: [], t, onRevive: () => {} });
+	text.length = 0;
+	gather(blank);
+	assert(text.includes("deletedEmpty"), `an empty blacklist says so rather than rendering nothing, saw ${JSON.stringify(text)}`);
+	assertEqual(sets.length, 0, "the view owns no state of its own: rendering does not touch a single setter");
+});
+
+test("panel: the batch-selection control exists and does something", () => {
+	// Split out of the settings check: the two are unrelated, and the settings page moving off
+	// the entry list is no reason for the batch-selection control to lose its guard.
+	const sets = [];
+	const react = makeReactStub({ onSet: (value) => sets.push(value) });
+	const bundle = loadBundle({ react });
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	const listTree = bundle.components[index]({ ...bundle.registered[index].inject(), t: (key) => key });
+	// The batch-selection control exists and does something.
+	const controls = [];
+	const collect = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) collect(child);
+			return;
+		}
+		if (typeof node.props?.onClick === "function" && node.props.title === "selectEnter") controls.push(node);
+		collect(node.props?.children);
+	};
+	collect(listTree);
+	assertEqual(controls.length, 1, "a batch-selection control must be rendered");
+	controls[0].props.onClick();
+	assert(sets.includes(true), `picking mode must be turned on, saw ${JSON.stringify(sets)}`);
+});
+
+// The host half is loaded ONCE, at module scope.
+//
+// A dynamic import inside a synchronous `test()` body is an unhandled rejection waiting to
+// happen: the runner does not await it, so the check reports before its assertion runs — and a
+// failure inside it crashes the process instead of being counted. Top-level await keeps this
+// check synchronous from the runner's point of view.
+const hostHalf = await import(pathToFileURL(join(libDir, "index.js")).href);
+
+test("host: the prompt obeys the language and depth preferences, and defaults to Chinese", () => {
+	// The prompt's SHAPE is what the JSON parser and the panel depend on, and the preferences
+	// are a closed set the page sends. Both halves were only reachable through a live model
+	// call before, which is why `auto` sat there as a silent default.
+	const { __buildSystemPrompt } = hostHalf;
+	const chinese = __buildSystemPrompt({ lang: "zh", depth: "normal" });
+	const english = __buildSystemPrompt({ lang: "en", depth: "normal" });
+	assert(chinese.includes("Do not answer in English"), "the Chinese instruction must keep its language rule");
+	assert(!english.includes("Do not answer in English"), "the English instruction must not carry the Chinese rule");
+	assert(english.includes("software engineering"), "and must ask for an English domain label");
+	// The JSON keys are field names, not prose: both languages must ask for the same four.
+	for (const prompt of [chinese, english]) {
+		assert(prompt.includes('{"zh": "...", "gloss": "...", "usage": "...", "domain": "..."}'), "the key set must not drift between languages");
+	}
+	// Depth narrows or widens the same base rather than replacing it.
+	assert(__buildSystemPrompt({ lang: "zh", depth: "brief" }).includes("不超过 20 字"), "brief must narrow the Chinese instruction");
+	assert(__buildSystemPrompt({ lang: "zh", depth: "detailed" }).includes("两到三句"), "detailed must widen it");
+	assertEqual(__buildSystemPrompt({ lang: "zh", depth: "normal" }).includes("再简短些"), false, "normal must add nothing");
+	// `auto` and a missing preference both fall to Chinese, by decision rather than by omission.
+	assertEqual(__buildSystemPrompt({ lang: "auto" }), chinese, "auto means Chinese here, because the page resolves it first");
+	assertEqual(__buildSystemPrompt({}), chinese, "and so does an absent preference");
+	assertEqual(__buildSystemPrompt({ lang: "klingon", depth: "essay" }), chinese, "an unknown pair falls back rather than reaching the model");
+});
+
+test("bundle: the diagnostic report never becomes a dictionary entry", () => {
+	// The beacon used to FILE itself as a dictionary entry, so every page load added `zz-hb-*`
+	// rows to the user's term list — a diagnostic writing into the data it diagnoses, which is
+	// how 66 of them ended up in a dictionary that holds two real terms. It is console-only
+	// now, and this is the guard: the page-side readouts (`console`, `__termDictionary`,
+	// `__termDictionaryBeacon`) are still allowed, the write is not.
+	const source = readFileSync(join(pluginDir, "lib", "client.js"), "utf8");
+	assert(!source.includes("await api.report("), "the report must not be filed through the entries API");
+	assert(source.includes("report (console only"), "and it must still be emitted, to the console");
+});
+
+test("bundle: the pointer layer is wired in the capture phase", () => {
+	// The pointer layer belonged to a second plugin (dsh-plugin-term-wikilink), and the dictionary
+	// deliberately did NOT listen for movement. It was merged in on 2026-10-09, so the dictionary
+	// now owns hover as well as click — and every pointer listener must be in the CAPTURE phase:
+	// React 17+ delegates to the root container below `document`, so any `stopPropagation()` in the
+	// tree can silence a bubble-phase listener, which is indistinguishable from "the page produced no
+	// event".
+	//
+	// This assertion is therefore the OPPOSITE of what it was: it used to require the ABSENCE of
+	// `pointermove`, precisely so that two plugins could not both answer a hover.
+	//
+	// The TYPES are not the claim — the PHASE is, and this check used to assert only the types while
+	// its own name and comment promised the phase. That is a false green of the worst kind: the one
+	// fact the whole pointer chain rests on, asserted by a check that could not see it. The sandbox
+	// now keeps the listener options so the phase is checkable, and `check-pointer-guards.mjs` M2
+	// (click → bubble) is what proves this assertion really bites.
+	//
+	// `selectionchange` is deliberately not in the phase list: it is fired at the document itself
+	// rather than delegated through the tree, so it has no bubble phase to lose.
+	const { documentListeners, documentListenerPhases } = loadBundle();
+	for (const type of ["click", "mousedown", "selectionchange", "pointermove"]) {
+		assert(documentListeners.includes(type), `the ${type} listener must be attached to the document`);
+	}
+	for (const type of ["click", "mousedown", "pointermove", "keydown"]) {
+		const registrations = documentListenerPhases.filter((entry) => entry.type === type);
+		assert(registrations.length > 0, `the ${type} listener must be registered, with its phase`);
+		assert(
+			registrations.every((entry) => entry.capture === true),
+			`every ${type} listener must be registered for the capture phase, saw ${JSON.stringify(registrations)}`
+		);
+	}
+});
+
+test("beacon: the report that reaches the console is the fitted one, and it names the stage", () => {
+	// The report is console-only now, so that console line IS the report — and two properties of it are
+	// the difference between a diagnosable page and a wall of text: it went through the fitter (which
+	// keeps the entry store's own limit and declares what it dropped), and it carries `trace`, the one
+	// field that says which hit-test stage refused. Both were asserted on the fitter itself; nothing
+	// asserted that the shell CALLS it before printing, which is the line a refactor drops.
+	const { MAX_CONTEXT_CHARS } = loadCore("entries.js");
+	const lines = [];
+	const fake = {
+		log: () => {},
+		warn: () => {},
+		error: () => {},
+		info: (label, text) => lines.push({ label: String(label), text: String(text) })
+	};
+	loadBundle({ console: fake });
+
+	const reports = lines.filter((line) => line.label.includes("report (console only, not filed)"));
+	assert(reports.length > 0, `the page must report when it starts, saw ${JSON.stringify(lines.map((line) => line.label))}`);
+	for (const line of reports) {
+		const report = JSON.parse(line.text);
+		assert(typeof report.b === "string" && typeof report.w === "string", "every report identifies its build and its kind");
+		assert(Array.isArray(report.dropped), "and came out of the fitter, which is what declares what a trimmed report removed");
+		assert(typeof report.trace === "string", "and carries the stage the hit test refused at, the one field that explains a dead gesture");
+		assert(line.text.length <= MAX_CONTEXT_CHARS, `a report must fit the limit the entry store keeps, saw ${line.text.length} against ${MAX_CONTEXT_CHARS}`);
+	}
+});
+
+test("bundle: the overlay renders the hint and the popup the shell asks for", () => {
+	// The other end of the same path: the interaction layer reports a hit, the shell sets an
+	// overlay state, and THIS component has to turn it into something visible. A state the
+	// overlay does not render is indistinguishable from "nothing happened".
+	const react = makeReactStub();
+	const { registered, components } = loadBundle({ react });
+	const index = registered.findIndex((options) => options.name === "shell.overlay");
+	assert(index >= 0, "the overlay slot registration must be captured");
+	const face = registered[index].inject();
+	const render = (overlayState) =>
+		components[index]({
+			...face,
+			overlay: { getSnapshot: () => overlayState, subscribe: () => () => {} }
+		});
+
+	/** Collect the element nodes anywhere in a stub tree that match a predicate. */
+	const findNodes = (node, match, out = []) => {
+		if (node === null || node === undefined || typeof node !== "object") return out;
+		if (Array.isArray(node)) {
+			for (const child of node) findNodes(child, match, out);
+			return out;
+		}
+		if (match(node)) out.push(node);
+		findNodes(node.props?.children, match, out);
+		return out;
+	};
+
+	// A hint state is now a state NOTHING renders: the hover card belongs to
+	// dsh-plugin-term-wikilink, which brings its own. What must not happen is the REVERSE —
+	// a state the overlay silently ignores is what used to make "nothing happened" invisible.
+	const hintTree = render({ kind: "hint", term: "WriteAheadLog", zh: "预写日志", gloss: "先写日志再改数据。", hasEntry: true, point: { x: 10, y: 10 } });
+	const hints = findNodes(hintTree, (node) => typeof node.props?.gloss === "string" && typeof node.props?.hasEntry === "boolean");
+	assertEqual(hints.length, 0, "the dictionary must no longer render a hover hint of its own");
+
+	const popupTree = render({ kind: "entry", term: "quorum", key: "quorum", context: "A quorum is a majority.", point: { x: 20, y: 20 } });
+	const popups = findNodes(popupTree, (node) => Object.prototype.hasOwnProperty.call(node.props ?? {}, "entry"));
+	assert(popups.length >= 1, "an entry state must still render its popup");
+	assertEqual(popups[0].props.term, "quorum", "carrying the term it explains");
+	assertEqual(popups[0].props.context, "A quorum is a majority.", "and the sentence it came from");
+});
+
+test("bus: the editor and reveal commands are independent", () => {
+	const { createPanelCommandBus } = loadCore("bus.js");
+	const bus = createPanelCommandBus();
+	bus.requestCreate("event sourcing", "the sentence it came from");
+	bus.requestFocus("quorum");
+	assertEqual(bus.consumeCreate().term, "event sourcing", "the editor command survives a reveal");
+	assertEqual(bus.consumeFocus().key, "quorum", "the reveal command survives an editor command");
+	assertEqual(bus.consumeCreate(), null, "consuming clears the editor slot");
+	assertEqual(bus.consumeFocus(), null, "consuming clears the reveal slot");
+	assertEqual(bus.peek(), null, "nothing is left pending");
+});
+
+test("copy: every Chinese string has an English twin and vice versa", () => {
+	// The panel, the popup and the hint all read their copy from this table, and a key
+	// missing on one side shows a raw key or an empty label in that locale.
+	const { zh, en } = loadCore("copy.js");
+	const zhKeys = Object.keys(zh).sort();
+	const enKeys = Object.keys(en).sort();
+	assertEqual(enKeys, zhKeys, "the two dictionaries must carry the same key set");
+	for (const key of zhKeys) {
+		assert(typeof zh[key] === "string" && zh[key].trim() !== "", `zh.${key} must be non-empty`);
+		assert(typeof en[key] === "string" && en[key].trim() !== "", `en.${key} must be non-empty`);
+	}
+	assert(typeof zh.explainDepth_normal === "string" && /[\u4e00-\u9fff]/.test(zh.explainDepth_normal), "the explanation-depth label must be Chinese");
+	assertEqual(/[\u4e00-\u9fff]/.test(zh.selectAdd), true, "the selection affordance label must be Chinese");
+});
+
+/**
+ * Remove comments so a scan sees only code.
+ *
+ * A scanner rather than a regex, for the reason `tools/build-client.mjs` documents: a
+ * regex would mangle a `//` inside a string literal, and a backtick in a comment would
+ * look like a template literal. String and template literals are copied verbatim.
+ *
+ * @param text - the source text.
+ * @returns the same text with block and line comments removed.
+ */
+function stripComments(text) {
+	let out = "";
+	let at = 0;
+	let quote = null;
+	while (at < text.length) {
+		const character = text[at];
+		const next = text[at + 1];
+		if (quote !== null) {
+			out += character;
+			if (character === "\\") {
+				out += next ?? "";
+				at += 2;
+				continue;
+			}
+			if (character === quote) quote = null;
+			at++;
+			continue;
+		}
+		if (character === '"' || character === "'" || character === "`") {
+			quote = character;
+			out += character;
+			at++;
+			continue;
+		}
+		if (character === "/" && next === "/") {
+			while (at < text.length && text[at] !== "\n") at++;
+			continue;
+		}
+		if (character === "/" && next === "*") {
+			at += 2;
+			while (at < text.length && !(text[at] === "*" && text[at + 1] === "/")) {
+				if (text[at] === "\n") out += "\n";
+				at++;
+			}
+			at += 2;
+			continue;
+		}
+		out += character;
+		at++;
+	}
+	return out;
+}
+
+test("style: every theme token the plugin names is really defined", () => {
+	// The regression guard for the invisible Save button.
+	//
+	// `primaryButton` used `--dsw-alias-label-inverse`, which the design platform does
+	// not define, next to `--dsw-alias-brand-primary`, which in the dark theme resolves
+	// to the same near-white value as `--dsw-alias-label-primary`. Label and fill were
+	// therefore both white and the button rendered as an empty rectangle — a bug no
+	// behavioural test could see, because nothing was functionally wrong.
+	//
+	// The list below is every `--dsw-alias-*` / `--dsw-specific-*` name defined by the
+	// shipped theme CSS, taken from
+	// `app.asar` → `dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js`
+	// (118 names), plus the four `--dsw-radius-*` the plugin uses. To refresh it after a
+	// host upgrade: extract that file and list `(--dsw-(alias|specific)-[a-z0-9-]+):`.
+	const DEFINED = new Set([
+		"--dsw-alias-bg-base", "--dsw-alias-bg-document-preview", "--dsw-alias-bg-document-selection",
+		"--dsw-alias-bg-layer-1", "--dsw-alias-bg-layer-2", "--dsw-alias-bg-layer-3",
+		"--dsw-alias-bg-mask-1", "--dsw-alias-bg-mask-2", "--dsw-alias-bg-mask-3",
+		"--dsw-alias-bg-mask-drop", "--dsw-alias-bg-mask-photo", "--dsw-alias-bg-module-platform",
+		"--dsw-alias-bg-multi-select", "--dsw-alias-bg-overlay", "--dsw-alias-bg-skeleton",
+		"--dsw-alias-border-inverted", "--dsw-alias-border-inverted2", "--dsw-alias-border-l1",
+		"--dsw-alias-border-l2", "--dsw-alias-border-l2-darkmode-thin", "--dsw-alias-border-l3",
+		"--dsw-alias-border-l4", "--dsw-alias-brand-primary", "--dsw-alias-brand-primary-invert",
+		"--dsw-alias-brand-primary-new-colorprimary-new-color", "--dsw-alias-brand-text",
+		"--dsw-alias-button-contrast-fill", "--dsw-alias-button-elevated-fill",
+		"--dsw-alias-button-floating-fill", "--dsw-alias-button-floating-hover",
+		"--dsw-alias-button-ghost-active-border", "--dsw-alias-button-ghost-active-fill",
+		"--dsw-alias-button-ghost-active-hover", "--dsw-alias-button-info-fill",
+		"--dsw-alias-button-info-hover", "--dsw-alias-button-primary-dimmed",
+		"--dsw-alias-button-primary-fill", "--dsw-alias-button-primary-hover",
+		"--dsw-alias-button-tool-bar-fill", "--dsw-alias-button-tool-bar-fill-invisible",
+		"--dsw-alias-button-tool-bar-hover", "--dsw-alias-code-diff-added",
+		"--dsw-alias-code-diff-deleted", "--dsw-alias-file-diff-added-bg",
+		"--dsw-alias-file-diff-added-gutter", "--dsw-alias-file-diff-added-marker",
+		"--dsw-alias-file-diff-deleted-bg", "--dsw-alias-file-diff-deleted-gutter",
+		"--dsw-alias-file-diff-deleted-marker", "--dsw-alias-interactive-bg-active",
+		"--dsw-alias-interactive-bg-hover", "--dsw-alias-interactive-bg-hover-accent",
+		"--dsw-alias-interactive-bg-hover-danger", "--dsw-alias-interactive-bg-hover-solid",
+		"--dsw-alias-label-caption", "--dsw-alias-label-deep-diving",
+		"--dsw-alias-label-deep-diving-shimmer", "--dsw-alias-label-dimmed",
+		"--dsw-alias-label-document-preview", "--dsw-alias-label-primary",
+		"--dsw-alias-label-primary-bluish", "--dsw-alias-label-primary-dimmed",
+		"--dsw-alias-label-primary-foreground", "--dsw-alias-label-primary-inverted",
+		"--dsw-alias-label-secondary", "--dsw-alias-label-shimmer", "--dsw-alias-label-tertiary",
+		"--dsw-alias-link", "--dsw-alias-markdown-citation", "--dsw-alias-markdown-code-block",
+		"--dsw-alias-markdown-code-block-banner", "--dsw-alias-markdown-code-segment-selected",
+		"--dsw-alias-markdown-code-segment-unselected", "--dsw-alias-markdown-inline-code",
+		"--dsw-alias-markdown-placeholder", "--dsw-alias-markdown-tag",
+		"--dsw-alias-menu-group-header-fill", "--dsw-alias-menu-icon", "--dsw-alias-onboarding-accent",
+		"--dsw-alias-onboarding-card-fill", "--dsw-alias-onboarding-checkbox-border",
+		"--dsw-alias-onboarding-secondary-fill", "--dsw-alias-scrollbar-bg-l1",
+		"--dsw-alias-scrollbar-bg-l2", "--dsw-alias-scrollbar-hover-l1",
+		"--dsw-alias-scrollbar-hover-l2", "--dsw-alias-settings-card-fill",
+		"--dsw-alias-settings-card-stroke", "--dsw-alias-state-business-primary",
+		"--dsw-alias-state-business-tertiary", "--dsw-alias-state-error-primary",
+		"--dsw-alias-state-error-secondary", "--dsw-alias-state-idle-primary",
+		"--dsw-alias-state-success-primary", "--dsw-alias-state-success-secondary",
+		"--dsw-alias-state-success-tertiary", "--dsw-alias-state-warn-label",
+		"--dsw-alias-state-warn-primary", "--dsw-alias-state-warn-secondary",
+		"--dsw-alias-state-warn-tertiary", "--dsw-alias-switch-thumb", "--dsw-alias-toast-bg",
+		"--dsw-alias-toast-label", "--dsw-alias-tooltip-bg", "--dsw-alias-tooltip-key-bg",
+		"--dsw-alias-turn-trigger-bg", "--dsw-alias-turn-trigger-bg-hover", "--dsw-specific-bubble",
+		"--dsw-specific-bubble-highlight", "--dsw-specific-input-major", "--dsw-specific-login-input",
+		"--dsw-specific-menu", "--dsw-specific-selector", "--dsw-specific-sidebar-fill",
+		"--dsw-specific-sidebar-nav-item-active", "--dsw-specific-sidebar-nav-item-active-accent",
+		"--dsw-specific-sidebar-nav-item-hover", "--dsw-specific-tip",
+		"--dsw-radius-xs", "--dsw-radius-sm", "--dsw-radius-md", "--dsw-radius-lg"
+	]);
+
+	const sources = readdirSync(coreDir)
+		.filter((name) => name.endsWith(".js"))
+		.map((name) => join(coreDir, name));
+	sources.push(join(libDir, "index.js"));
+
+	const unknown = new Map();
+	for (const file of sources) {
+		// Comments are removed before the scan: a token named in prose is documentation,
+		// and the comments that explain this very bug name the bad tokens deliberately.
+		// String and template literals are copied through, because that is where a style
+		// value's token actually lives.
+		const text = stripComments(readFileSync(file, "utf8"));
+		for (const match of text.matchAll(/--dsw-(?:alias|specific|radius)-[a-z0-9-]+/g)) {
+			const token = match[0];
+			// A trailing dash is the `--dsw-alias-*` glob, not a name.
+			if (token.endsWith("-")) continue;
+			if (DEFINED.has(token)) continue;
+			if (!unknown.has(token)) unknown.set(token, []);
+			unknown.get(token).push(file.slice(pluginDir.length + 1));
+		}
+	}
+	assertEqual(
+		[...unknown.entries()].map(([token, files]) => `${token} (${files.join(", ")})`),
+		[],
+		"every referenced theme token must exist in the design platform"
+	);
+});
+
+//#endregion
+
+//#region async
+
+/**
+ * Let queued microtasks and one timer turn run, so a fire-and-forget promise
+ * chain can finish. Used by the hydration check.
+ * @returns a promise settling after the queue drains.
+ */
+function drainMicrotasks() {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Run the checks that need to await real I/O. */
+async function asyncChecks() {
+	await storeChecks();
+	await asyncCheck("store: a batch delete removes every picked entry in one write", "batch", async () => {
+		// The panel's batch delete must not commit per row: every commit persists the whole
+		// document and pushes it to the host, so twenty rows one at a time would mean twenty
+		// round trips. Each removal still has to leave its own tombstone, or the host's copy
+		// brings the rows straight back.
+		const { createDictionaryStore } = loadCore("store.js");
+		const { emptyState } = loadCore("dictionary.js");
+		let saves = 0;
+		const store = createDictionaryStore({
+			local: {
+				load: () => emptyState({ now: 1 }),
+				save: async () => {
+					saves++;
+				}
+			},
+			remote: null,
+			logger: { warn: () => {} }
+		});
+		for (const term of ["alpha", "beta", "gamma", "delta"]) {
+			await store.saveEntry(term, { definition: { gloss: term } });
+		}
+		assertEqual(store.getState().entries.length, 4, "four entries to start");
+		const doomed = store.list("", "all").filter((entry) => entry.term !== "delta");
+		assertEqual(doomed.length, 3, "three of them picked");
+		const before = saves;
+		const removed = await store.deleteEntries(doomed.map((entry) => entry.id));
+		assertEqual(removed, 3, "all three are removed");
+		assertEqual(saves - before, 1, "in exactly one document write");
+		assertEqual(store.list("", "all").map((entry) => entry.term), ["delta"], "and only the unpicked entry is left");
+		// The tombstones are what stop a union merge from restoring them.
+		const merged = loadCore("dictionary.js").mergeDocuments(store.getState(), loadCore("dictionary.js").editEntry(emptyState({ now: 1 }), "alpha", { definition: { gloss: "back" } }, { now: 2 }).state, { now: 900 });
+		assertEqual(merged.entries.some((entry) => entry.term === "alpha"), false, "a batch-deleted entry must not come back from another copy");
+	});
+
+	await asyncCheck("transfer: the export page lists the categories the data has, and copies only what is ticked", "transferExport", async () => {
+		// The page's half of the export. `transfer.js` decides what a scope MEANS; this decides whether
+		// the checklist the user ticks is the one the data implies, and whether what lands in the
+		// clipboard is what the boxes say. Until now the page was only reachable through the pure
+		// module, so a page that listed the wrong categories — or exported the wrong subset — looked
+		// exactly like a page that worked.
+		const { applyStyles } = loadCore("styles.js");
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		assert(typeof bundle.exports.transferPage === "function", "the transfer page must be reachable for checks");
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { gloss: "g" }, domain: "分布式" });
+		await face.store.saveEntry("Idempotent", { definition: { gloss: "g" }, domain: "分布式" });
+		await face.store.saveEntry("Entropy", { definition: { gloss: "g" }, domain: "信息论" });
+		await face.store.saveEntry("Loose", { definition: { gloss: "g" } });
+
+		/** Every JSON text this page has put on the clipboard, in order. */
+		const copied = [];
+		bundle.sandbox.navigator = { clipboard: { writeText: async (text) => { copied.push(text); } } };
+
+		const props = { store: face.store, t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`), setToast: () => {} };
+		const renderPage = () => {
+			react.__beginRender();
+			return bundle.exports.transferPage(props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+		const copy = (tree) => {
+			const button = find(tree, (node) => node.props?.label === "transferCopy" && typeof node.props.onClick === "function")[0];
+			assert(button !== undefined, "the page must offer copying the JSON");
+			button.props.onClick();
+			return JSON.parse(copied[copied.length - 1]);
+		};
+		/**
+		 * The checkboxes of the EXPORT half.
+		 *
+		 * The page carries the import half too, and its opt-in box is a checkbox as well — counting
+		 * every box on the page was how this check first passed for the wrong reason. The opt-in is
+		 * identified by the label it lives in, so the two halves cannot be confused again.
+		 */
+		const categoryBoxes = (tree) => {
+			const found = [];
+			const walk = (node, inOptIn) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child, inOptIn);
+					return;
+				}
+				const here = inOptIn || node.props?.["data-term-dictionary"] === "transfer-include-deleted";
+				if (node.props?.type === "checkbox" && !here) found.push(node);
+				walk(node.props?.children, here);
+			};
+			walk(tree, false);
+			return found;
+		};
+
+		const first = renderPage();
+		const bars = find(first, (node) => typeof node.props?.onSelect === "function");
+		assertEqual(bars.length, 1, "one export scope control");
+		assertEqual(bars[0].props.options.map((option) => option.value), ["all", "domains"], "offering everything or by category");
+		assertEqual(categoryBoxes(first).length, 0, "with everything selected there is nothing to tick");
+		assertEqual(copy(first).entries.length, 4, "and everything means all four entries");
+
+		bars[0].props.onSelect("domains");
+		const byDomain = renderPage();
+		const boxes = categoryBoxes(byDomain);
+		assertEqual(boxes.length, 2, "one box per category the data has, and never one for an entry that has none");
+		assertEqual(
+			find(byDomain, (node) => typeof node.props?.["data-term-domain"] === "string").map((node) => node.props["data-term-domain"]),
+			["分布式", "信息论"],
+			"named from the data, most-populated first"
+		);
+		assertEqual(copy(byDomain).entries.length, 0, "and selecting no category exports nothing rather than everything");
+
+		boxes[1].props.onChange();
+		const ticked = renderPage();
+		assertEqual(categoryBoxes(ticked).map((box) => box.props.checked), [false, true], "the box that was ticked is the box the page shows as ticked");
+		assertEqual(copy(ticked).entries.map((entry) => entry.term), ["Entropy"], "ticking one category exports only its entries");
+
+		// Select-all reaches the categories, not every entry: an entry with no domain belongs to no
+		// category, so a by-category export cannot carry it. Saying so is better than a checklist that
+		// quietly means "all".
+		find(renderPage(), (node) => node.props?.children === "transferSelectAll")[0].props.onClick();
+		assertEqual(copy(renderPage()).entries.map((entry) => entry.term).sort(), ["Entropy", "Idempotent", "Quorum"], "select-all takes every categorised entry");
+
+		find(renderPage(), (node) => node.props?.children === "transferSelectNone")[0].props.onClick();
+		assertEqual(copy(renderPage()).entries.length, 0, "and select-none empties it again");
+	});
+
+	await asyncCheck("transfer: the import page applies the file and reports every count it passed over", "transferImport", async () => {
+		// The other half of the page, and the one with the most ways to be quietly wrong: it reads a
+		// real File, reports what it took AND what it passed over, and only revives what it was told
+		// to. "Imported 1" alone would be true and useless — the three skipped entries are the news.
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { gloss: "本地解释" }, domain: "分布式" });
+		await face.store.saveEntry("Entropy", { definition: { gloss: "g" } });
+		await face.store.deleteEntry("Entropy");
+
+		const props = { store: face.store, t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`), setToast: () => {} };
+		const renderPage = () => {
+			react.__beginRender();
+			return bundle.exports.transferPage(props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+		/** The counts the page reported, or undefined while it has not reported anything yet. */
+		const reportedCounts = (tree) => {
+			const line = find(tree, (node) => typeof node.props?.children === "string" && node.props.children.startsWith("transferReport"))[0];
+			return line === undefined ? undefined : JSON.parse(line.props.children.slice("transferReport|".length));
+		};
+		/** Any failure line the page showed, so a refused import cannot read as a silent one. */
+		const failures = (tree) => find(tree, (node) => typeof node.props?.children === "string" && node.props.children.startsWith("transferFailed")).map((node) => node.props.children);
+
+		// A file like one a user would bring: an entry that is new, one they already have, one they
+		// deleted, its own duplicate, and a record with no term in it at all.
+		const text = JSON.stringify({
+			kind: "dsh-term-dictionary",
+			version: 1,
+			entries: [
+				{ term: "Idempotent", key: "idempotent", definition: { gloss: "来自文件" }, domain: "分布式" },
+				{ term: "Quorum", key: "quorum" },
+				{ term: "Entropy", key: "entropy" },
+				{ term: "Idempotent", key: "idempotent" },
+				{ nope: 1 }
+			]
+		});
+		const pick = () => ({ target: { files: [{ text: async () => text }] } });
+		const fileInput = (tree) => find(tree, (node) => node.props?.type === "file")[0];
+		/** The opt-in box, identified by the label it lives in rather than by being "the checkbox". */
+		const optInBox = (tree) => {
+			let found = null;
+			const walk = (node, inOptIn) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child, inOptIn);
+					return;
+				}
+				const here = inOptIn || node.props?.["data-term-dictionary"] === "transfer-include-deleted";
+				if (here && node.props?.type === "checkbox") found = node;
+				walk(node.props?.children, here);
+			};
+			walk(tree, false);
+			return found;
+		};
+
+		const start = renderPage();
+		assert(optInBox(start) !== null, "the import half offers the opt-in for entries the user deleted");
+		assertEqual(reportedCounts(start), undefined, "and no report before anything was imported");
+		fileInput(start).props.onChange(pick());
+		await drainMicrotasks();
+		await drainMicrotasks();
+		const after = renderPage();
+		assertEqual(failures(after), [], "the import must not have been refused");
+		assertEqual(reportedCounts(after), { imported: 1, existing: 1, deleted: 1, duplicates: 2 }, "every fate is counted");
+		assertEqual(face.store.list("", "all").map((entry) => entry.term).sort(), ["Idempotent", "Quorum"], "only the new entry was taken");
+		assertEqual(face.store.list("", "all").find((entry) => entry.term === "Quorum").definition.gloss, "本地解释", "the entry already here kept its own text, not the file's");
+		assertEqual(face.store.list("", "all").find((entry) => entry.term === "Idempotent").definition.gloss, "来自文件", "while the new one carries the file's");
+		assertEqual(face.store.list("", "deleted").map((entry) => entry.term), ["Entropy"], "and the entry the user deleted is still deleted");
+
+		// Ticked, the same file brings it back — and the report's "you deleted" is then a real zero
+		// rather than a number that quietly changed meaning.
+		optInBox(after).props.onChange();
+		const ticked = renderPage();
+		fileInput(ticked).props.onChange(pick());
+		await drainMicrotasks();
+		await drainMicrotasks();
+		const second = renderPage();
+		assertEqual(failures(second), [], "nor the second time");
+		assertEqual(reportedCounts(second), { imported: 1, existing: 2, deleted: 0, duplicates: 2 }, "the deleted entry is imported, and no longer skipped");
+		assertEqual(face.store.list("", "all").map((entry) => entry.term).sort(), ["Entropy", "Idempotent", "Quorum"], "it is live again");
+		assertEqual(face.store.list("", "deleted").length, 0, "and off the deleted list");
+	});
+
+	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {
+		// The end-to-end half, and the one the other two checks cannot reach: the tab is clicked, the
+		// panel is rendered again, and the 撤回 button of the row it then shows is pressed through the
+		// store — which is the whole path a user takes, and the two lines of glue in the middle.
+		const toasts = [];
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		// Let hydration finish before writing, or its continuation could adopt a document from a
+		// moment when these entries did not exist yet.
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { gloss: "g" } });
+		await face.store.saveEntry("Entropy", { definition: { gloss: "g" } });
+		await face.store.deleteEntry("Entropy");
+		assertEqual(face.store.list("", "deleted").map((entry) => entry.term), ["Entropy"], "one tombstone to show");
+
+		const props = { ...face, t: (key) => key, setToast: (value) => toasts.push(value) };
+		/** The panel's tree as it stands now, with its hook state carried over between renders. */
+		const renderPanel = () => {
+			react.__beginRender();
+			return bundle.components[index](props);
+		};
+		/** Every node of one type in the tree. */
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+
+		// Nothing is selected yet: the panel lists the live entry and does not render the deleted view.
+		const first = renderPanel();
+		assertEqual(find(first, (node) => node.type === bundle.exports.deletedList).length, 0, "the deleted view is not shown while the ordinary list is selected");
+		const tabs = find(first, (node) => node.props?.role === "tab");
+		const deletedTab = tabs.find((tab) => tab.props.children === "filterDeleted");
+		assert(deletedTab !== undefined, "and its tab is how you get there");
+
+		deletedTab.props.onClick();
+		// The view is a component ELEMENT in the panel's tree, and this harness does not render
+		// components — so it is collected by its own type and driven through its props. That is the
+		// stronger half anyway: it asserts what the PANEL hands the view (its `entries`), which is the
+		// panel's line, and then presses the button the panel wired up.
+		const views = find(renderPanel(), (node) => node.type === bundle.exports.deletedList);
+		assertEqual(views.length, 1, "with the deleted tab selected, the panel's list IS the deleted view");
+		const view = views[0];
+		assertEqual(view.props.entries.map((entry) => entry.term), ["Entropy"], "fed the tombstones the store reports for that one filter");
+		assert(typeof view.props.onRevive === "function", "and handed the way back");
+
+		view.props.onRevive(view.props.entries[0]);
+		await drainMicrotasks();
+		assertEqual(face.store.list("", "deleted").length, 0, "pressing 撤回 takes the tombstone off the deleted list");
+		assertEqual(face.store.list("", "all").map((entry) => entry.term).sort(), ["Entropy", "Quorum"], "and puts the entry back in the dictionary");
+		assertEqual(face.store.getState().deletedKeys, [], "the key is no longer announced as deleted, so the next merge cannot re-delete it");
+		assertEqual(toasts.map((toast) => toast.text), ["toastRevived"], "and the notice names what came back, because the row leaving is the only other sign");
+	});
+
+	await asyncCheck("store: reviving reports whether it did anything, and never invents a write", "revive", async () => {
+		// The store's half. Three outcomes, and only the first one is a write: reviving a live entry
+		// and reviving a term that was never here are both no-ops, so pressing a stale button — or
+		// pressing twice — cannot re-stamp a live entry into a newer revision of itself.
+		//
+		// The clock is injected and deliberately does NOT move between the delete and the revive.
+		// That is the case the `+1` exists for: with `now` standing still, a revival stamped with
+		// `now` alone is not strictly newer than the deletion it undoes, and the next merge deletes it
+		// again. Driving it on the real clock would make this check pass or fail depending on how
+		// many milliseconds the two calls happened to fall apart — which is how a check like this
+		// reports green while the mechanism is broken.
+		const { emptyState, mergeDocuments } = loadCore("dictionary.js");
+		let clock = 1000;
+		let writes = 0;
+		const store = createDictionaryStore({
+			local: {
+				load: () => emptyState({ now: 1 }),
+				save: async () => {
+					writes++;
+				}
+			},
+			remote: null,
+			now: () => clock,
+			logger: { warn: () => {} }
+		});
+		await store.saveEntry("Quorum", { definition: { gloss: "g" } });
+		await store.deleteEntry("Quorum");
+		// The copy that still carries the tombstone, which is what a second window or the host holds.
+		const deletedCopy = store.getState();
+		assertEqual(store.list("", "deleted").length, 1, "the entry is deleted, so there is something to revive");
+
+		const before = writes;
+		const restored = await store.reviveEntry("Quorum");
+		assert(restored !== null && restored.term === "Quorum", "reviving a deleted entry returns it");
+		assertEqual(writes - before, 1, "and that is one document write");
+		assertEqual(store.list("", "all").map((entry) => entry.term), ["Quorum"], "the entry is live again");
+		assertEqual(store.list("", "deleted").length, 0, "and off the deleted list");
+		// The point of the whole mechanism: the copy still carrying the tombstone cannot re-delete it,
+		// because the revival is a CRAFTED record stamped strictly past the deletion.
+		const merged = mergeDocuments(store.getState(), deletedCopy, { now: clock });
+		assertEqual(merged.entries.map((entry) => entry.term), ["Quorum"], "a merge with the copy that still has the tombstone keeps it alive");
+		assertEqual(merged.entries[0].source, "user", "because a revival is user intent, the only thing that outweighs a deletion");
+
+		const after = writes;
+		assertEqual(await store.reviveEntry("Quorum"), null, "reviving a live entry reports that it did nothing");
+		assertEqual(await store.reviveEntry("never heard of it"), null, "and so does reviving a term that was never here");
+		assertEqual(writes, after, "neither of them wrote a document");
+	});
+
+	await asyncCheck("transfer: an imported entry the user deleted is revived by the import's own write path", "importRevive", async () => {
+		// The seam, and the one an end-to-end reader would call "does it actually work". The plan's
+		// bucketing is checked in the pure suite and the store's revival in its own check; what can
+		// still be missing is the JOIN — the import writes through `store.saveEntry`, so the opt-in is
+		// only real if an ordinary save of a tombstoned term revives it and keeps it alive.
+		//
+		// The clock is frozen for the same reason as the check above: `stamp = now` would not be
+		// strictly newer than the deletion, and the merge would put the entry back in the tombstone.
+		const { emptyState, mergeDocuments } = loadCore("dictionary.js");
+		const { parseImport, planImport } = loadCore("transfer.js");
+		const clock = 5000;
+		const store = createDictionaryStore({
+			local: { load: () => emptyState({ now: 1 }), save: async () => {} },
+			remote: null,
+			now: () => clock,
+			logger: { warn: () => {} }
+		});
+		await store.saveEntry("Entropy", { definition: { gloss: "旧解释" } });
+		await store.deleteEntry("Entropy");
+		const deletedCopy = store.getState();
+		const parsed = parseImport('[{"term":"Entropy","key":"entropy","definition":{"gloss":"来自文件"}}]');
+
+		// Unticked, the file changes nothing: that IS the blacklist doing its job.
+		const refused = planImport(store.getState().entries, parsed.entries, store.getState().deletedKeys);
+		assertEqual(refused.accepted.length, 0, "an entry the user deleted is not taken unless asked for");
+		assertEqual(refused.deleted.map((entry) => entry.term), ["Entropy"], "it lands in the deleted bucket instead");
+
+		// Ticked, it goes through the very write the panel performs.
+		const taken = planImport(store.getState().entries, parsed.entries, store.getState().deletedKeys, { includeDeleted: true });
+		assertEqual(taken.accepted.map((entry) => entry.term), ["Entropy"], "opting in hands it to the caller to write");
+		for (const entry of taken.accepted) {
+			await store.saveEntry(entry.term, { definition: entry.definition, domain: entry.domain, aliases: entry.aliases, pinned: entry.pinned });
+		}
+		assertEqual(store.list("", "all").map((entry) => entry.term), ["Entropy"], "the imported entry is live");
+		assertEqual(store.list("", "deleted").length, 0, "and off the deleted list");
+		const live = store.list("", "all")[0];
+		assertEqual(live.definition.gloss, "来自文件", "carrying the file's text, not the text it was deleted with");
+		assertEqual(live.source, "user", "stamped as the user's own, which is what makes a revival survive");
+		const merged = mergeDocuments(store.getState(), deletedCopy, { now: clock });
+		assertEqual(merged.entries.map((entry) => entry.term), ["Entropy"], "and the copy that still has the tombstone cannot take it back");
+	});
+
+	await asyncCheck("host: the model route prefers the profile's own selection", "route", async () => {
+		// The reported failure: generation died with `no API key for provider route
+		// "deepseek-official"` because `listProviders()` returns registration order and
+		// the API-key route is registered before the signed-in account route the window
+		// was actually using. The profile's own selection must win over the catalog.
+		const { __resolveTarget, __resolveTargets, __isCredentialFailure } = await import(pathToFileURL(join(libDir, "index.js")).href);
+		const llm = (providers, models = {}) => ({
+			listProviders: () => providers.map((id) => ({ id, name: id })),
+			listModels: async (provider) => models[provider] ?? []
+		});
+		const selection = (value) => ({ currentSelection: () => value });
+
+		// 1. the profile's selection beats the first registered provider
+		assertEqual(
+			await __resolveTarget(llm(["deepseek-official", "deepseek-account"]), {}, selection({ provider: "deepseek-account", model: "deepseek-flash" })),
+			{ provider: "deepseek-account", model: "deepseek-flash" },
+			"the configured default route must win over the first registered provider"
+		);
+
+		// 2. explicit plugin config beats everything
+		assertEqual(
+			await __resolveTarget(llm(["deepseek-official"]), { provider: "pinned", model: "m" }, selection({ provider: "deepseek-account", model: "deepseek-flash" })),
+			{ provider: "pinned", model: "m" },
+			"an explicit config must win"
+		);
+
+		// 3. a selection naming a provider this half cannot SEE is tried FIRST, not ignored.
+		//
+		// This reverses what used to be written here as correct ("an unregistered selection
+		// must fall back to the catalog"). That rule IS the reported bug: it discarded the
+		// route the user had chosen — the one their window is already talking through, and
+		// therefore the one that is credentialed — and used the first registered route
+		// instead, which in this profile is the API-key route, producing
+		// `no API key for provider route "deepseek-official"`.
+		assertEqual(
+			await __resolveTarget(llm(["deepseek-official"], { "deepseek-official": [{ id: "first" }] }), {}, selection({ provider: "ghost", model: "m" })),
+			{ provider: "ghost", model: "m" },
+			"an unregistered selection is tried first"
+		);
+
+		// ... and the route after it is kept, so a failure can fall through rather than end
+		// the request.
+		assertEqual(
+			(await __resolveTargets(llm(["deepseek-official"], { "deepseek-official": [{ id: "first" }] }), {}, selection({ provider: "ghost", model: "m" }))).map((entry) => entry.provider),
+			["ghost", "deepseek-official"],
+			"and the catalog route stays behind it as a fallback"
+		);
+
+		// 4. the fall-through only happens for a MISSING CREDENTIAL. A model-side failure is a
+		// real error and must be reported, not forwarded to a second provider.
+		assert(
+			__isCredentialFailure('llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service, or export DEEPSEEK_API_KEY in the launching environment'),
+			"the reported failure must be recognized as a credential failure"
+		);
+		assert(!__isCredentialFailure("the model did not return a usable explanation"), "a model-side failure must not be");
+		assert(!__isCredentialFailure("model not found: deepseek-nope"), "nor must an unknown model");
+
+		// 5. the selection's model is never borrowed by a different provider
+		assertEqual(
+			await __resolveTarget(llm(["deepseek-official"], { "deepseek-official": [{ id: "first" }] }), {}, selection({ provider: "deepseek-account", model: "deepseek-flash" })),
+			{ provider: "deepseek-account", model: "deepseek-flash" },
+			"the selection leads with its own model"
+		);
+		assertEqual(
+			(await __resolveTargets(llm(["deepseek-official"], { "deepseek-official": [{ id: "first" }] }), {}, selection({ provider: "deepseek-account", model: "deepseek-flash" })))[1],
+			{ provider: "deepseek-official", model: "first" },
+			"and the catalog route does not inherit that model id"
+		);
+
+		// 5. no selection service at all still works
+		assertEqual(
+			await __resolveTarget(llm(["only"], { only: [{ id: "m1" }] }), {}, null),
+			{ provider: "only", model: "m1" },
+			"a composition without the selection service must still route"
+		);
+
+		// 6. a broken selection service is survivable
+		assertEqual(
+			await __resolveTarget(
+				llm(["only"], { only: [{ id: "m1" }] }),
+				{},
+				{
+					currentSelection() {
+						throw new Error("owner is gone");
+					}
+				},
+				{ warn: () => {} }
+			),
+			{ provider: "only", model: "m1" },
+			"a throwing selection service must not break generation"
+		);
+	});
+
+	await asyncCheck("manifest: the host half exports no activation-blocking Config", "activation", async () => {
+		// Cordis resolves a row's config with `runtime.Config["~standard"].validate`.
+		// A JSON Schema (which this plugin used to export) has no `~standard`, so
+		// activation died with "Cannot read properties of undefined (reading 'validate')"
+		// — a typo-looking failure that took the whole plugin down. Either export a real
+		// Standard Schema, or export nothing and let the row's config pass through.
+		const host = await import(pathToFileURL(join(libDir, "index.js")).href);
+		assert(typeof host.apply === "function", "the host half must still export apply");
+		assertEqual(Array.isArray(host.inject), true, "the host half must still declare its inject list");
+		if (host.Config !== undefined) {
+			const standard = host.Config["~standard"];
+			assert(
+				standard !== undefined && typeof standard.validate === "function",
+				"a Config export must be a Standard Schema (it needs `~standard.validate`), or cordis refuses to activate the plugin"
+			);
+		}
+	});
+	await asyncCheck("bundle: apply hydrates the store from local storage", "hydrate", async () => {
+		// The regression guard for the plugin's worst failure mode: if `apply` never
+		// hydrates, the panel and the detector stay empty forever and the plugin looks
+		// installed while doing nothing.
+		//
+		// `apply` returns before the hydration promise settles, so the queue is
+		// drained and the loaded entry is then read back through the very store the
+		// panel receives.
+		const storage = new MapStorage();
+		storage.setItem(
+			"dsh-plugin-term-dictionary:v1",
+			JSON.stringify({ schemaVersion: 1, entries: [{ term: "Quorum", definition: { gloss: "多数派确认。" }, source: "user" }] })
+		);
+		const { registered } = loadBundle({ storage });
+		const panel = registered.find((options) => options.name === "main");
+		assert(panel !== undefined, "the panel must be registered");
+		const store = panel.inject().store;
+		await drainMicrotasks();
+		assertEqual(store.getState().entries.length, 1, "hydration must load the stored entry");
+		assertEqual(store.getState().entries[0].term, "Quorum", "the stored term");
+		assertEqual(store.getSnapshot().stats.total, 1, "the projection the panel renders must see it");
+	});
+
+
+	await asyncCheck("hover: the delays govern appearing and leaving, and a pending exit is cancelled", "hoverDelays", async () => {
+		// The pointer layer is exercised directly: `hover.js` has no React and no host dependency, so
+		// the two knobs can be driven here rather than through a browser.
+		const { createHoverLayer } = loadCore("hover.js");
+		const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+		const text = { nodeType: 3, nodeValue: "A quorum decides.", parentElement: null, childNodes: [] };
+		const onTerm = { node: text, start: 2, end: 8, term: "quorum", key: "quorum", id: "" };
+		const zone = { classList: { add: () => {}, remove: () => {} } };
+		const target = { closest: () => zone };
+		/** Where the caret is: on the term, or off it. */
+		let offset = 4;
+		const listeners = {};
+		const documentStub = {
+			caretRangeFromPoint: () => ({ startContainer: text, startOffset: offset }),
+			addEventListener: (type, handler) => {
+				(listeners[type] ??= []).push(handler);
+			},
+			removeEventListener: () => {},
+			createRange: () => ({
+				setStart: () => {},
+				setEnd: () => {},
+				getBoundingClientRect: () => ({ left: 0, top: 0, right: 10, bottom: 10, width: 10, height: 10 })
+			})
+		};
+		let outMs = 0;
+		const layer = createHoverLayer({ document: documentStub, segments: () => [onTerm], delays: () => ({ inMs: 30, outMs }), disposers: [] });
+		layer.attach();
+		const move = (x) => {
+			for (const handler of listeners.pointermove ?? []) handler({ target, clientX: x, clientY: 5 });
+		};
+		const kind = () => layer.view.getSnapshot().kind;
+
+		// The ENTRY delay is what it says: nothing appears before it elapses.
+		move(5);
+		assertEqual(kind(), "closed", "nothing appears before the entry delay elapses");
+		await wait(70);
+		assertEqual(kind(), "open", "and it appears once the delay has");
+
+		// The EXIT delay defaults to zero, so leaving closes on the move itself.
+		offset = 0;
+		move(20);
+		assertEqual(kind(), "closed", "with no exit delay, leaving closes at once");
+
+		// A configured exit delay defers the close... and is CANCELLED by coming back. Without the
+		// cancellation the card would be closed from under a pointer that is on a term again.
+		outMs = 60;
+		offset = 4;
+		move(5);
+		await wait(70);
+		assertEqual(kind(), "open", "the card is back on the term");
+		offset = 0;
+		move(20);
+		assertEqual(kind(), "open", "a pending exit keeps the card up for the grace period");
+		offset = 4;
+		move(5);
+		await wait(90);
+		assertEqual(kind(), "open", "and returning to a term cancels that pending exit");
+		offset = 0;
+		move(20);
+		await wait(90);
+		assertEqual(kind(), "closed", "while leaving again really does close it, after the grace period");
+
+		layer.detach();
+	});
+
+	await asyncCheck("api: the client posts the context it was handed, shortening nothing itself", "explainWhole", async () => {
+		// What this proves, and what it does not: the client puts the whole string it was given
+		// into the request body. It does NOT prove the model saw it whole — the host clamps the
+		// context to its own prompt budget (`buildPrompt` slices it), which is a deliberate
+		// product limit rather than a silent truncation, so it is asserted where it lives.
+		//
+		// This used to drive `api.report`, the beacon's filing call. That method is gone (the
+		// report is console-only now), so the same property is asserted through `explain`, the
+		// live path that carries a context — and the preferences travel with it, so they are
+		// asserted here too rather than only at the prompt builder.
+		const { createApiClient } = loadCore("api.js");
+		let stored = null;
+		const client = createApiClient({
+			base: "http://127.0.0.1",
+			fetchImpl: (url, init) => {
+				if (String(url).includes("/explain")) stored = JSON.parse(init.body);
+				return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ definition: { zh: "探针", gloss: "g" } })) });
+			}
+		});
+		const long = `${"y".repeat(900)}the part a cap eats`;
+		const answer = await client.explain("Probe", long, { lang: "en", depth: "detailed" });
+		assertEqual(answer.ok, true, "the explanation must come back");
+		assert(stored !== null, "the client must POST a parseable explanation payload");
+		assertEqual(String(stored.context).length, long.length, `a ${long.length}-character context must be posted whole, saw ${String(stored.context).length}`);
+		assert(String(stored.context).endsWith("the part a cap eats"), "the client must not trim the tail it was handed");
+		assertEqual([stored.lang, stored.depth], ["en", "detailed"], "and the explanation preferences must travel with it");
+	});
+
+	await asyncCheck("beacon: an oversized report names what it dropped instead of being cut", "beaconFit", async () => {
+		// The other half of the same boundary. A report longer than the entry store's own limit
+		// arrives as JSON cut mid-string: unparseable, with the decisive head kept and the
+		// reason for the failure gone — which is how five reports on disk read. Trimming is only
+		// honest if it says what it removed, so this asserts the limit, the parseability, the
+		// drop list, and that the counters answering the pointer question are the survivors.
+		const { exports } = loadBundle();
+		const { MAX_CONTEXT_CHARS } = loadCore("entries.js");
+		const oversized = {
+			b: "td-test",
+			w: "hover",
+			at: 1,
+			seen: 9,
+			inR: 0,
+			out: 9,
+			hasRegion: false,
+			chats: 0,
+			budget: { hover: 0, click: 5, reject: 3 },
+			blocks: 40,
+			hl: 12,
+			// A late-order field big enough that a cap looser than the store's own would leave it
+			// in. Without it this check passes against any limit, because dropping `probe` alone
+			// already fits a report of this size.
+			style: "s".repeat(MAX_CONTEXT_CHARS),
+			probe: { caret: "x".repeat(MAX_CONTEXT_CHARS * 5) }
+		};
+		const text = exports.fitBeacon(oversized);
+		assert(
+			text.length <= MAX_CONTEXT_CHARS,
+			`a report must fit the context the entry store keeps, saw ${text.length} against ${MAX_CONTEXT_CHARS}`
+		);
+		const kept = JSON.parse(text);
+		assert(Array.isArray(kept.dropped) && kept.dropped.includes("probe"), `the oversized field must be declared dropped, saw ${JSON.stringify(kept.dropped)}`);
+		assertEqual(kept.seen, 9, "the pointer counters survive the trim");
+		assertEqual(kept.inR, 0, "and so does the one that says the region was never entered");
+		// The other exit: a report nothing in the drop order can shrink. The fields the order
+		// does not name are then the ones that go, and the transcript count is not among them —
+		// `blocks` is what separates a transcript the settled pass never read (`null`) from one it
+		// read and found nothing in (`0`), which is the distinction every report on disk lost.
+		const unshrinkable = {
+			b: "td-test",
+			w: "hover",
+			at: 1,
+			seen: 9,
+			inR: 0,
+			hasRegion: true,
+			chats: 1,
+			blocks: 7,
+			budget: { hover: 4, click: 5, reject: 3 },
+			somethingNew: "u".repeat(MAX_CONTEXT_CHARS * 3)
+		};
+		const trimmed = JSON.parse(exports.fitBeacon(unshrinkable));
+		assertEqual(trimmed.blocks, 7, "the transcript count is kept even when the drop order has nothing left to give");
+		assert(trimmed.dropped.includes("somethingNew"), `an unlisted field is what gets dropped, saw ${JSON.stringify(trimmed.dropped)}`);
+	});
+
+	await asyncCheck("beacon: a report names the hit-test stage that refused most", "beaconTrace", async () => {
+		// Hundreds of moves inside the transcript with `hints` at zero is not a diagnosis, and the
+		// reason lives in ten exits inside `termAtPoint`. Carrying all ten would cost the report
+		// the entry store's own limit, so it carries the one that refused most — and that one
+		// field has to survive the trim, or it exists only on a page that never needed trimming.
+		const { exports } = loadBundle();
+		const { MAX_CONTEXT_CHARS } = loadCore("entries.js");
+		assertEqual(exports.topStage({ "no-block": 2, "not-known": 1, ok: 40 }), "no-block:2", "the stage that refuses most is the one named");
+		assertEqual(exports.topStage({ "no-block": 1, "not-known": 3, ok: 0 }), "not-known:3", "and the index outranks the geometry when it refuses more");
+		// A stage that never fired must not be reported as the failure — that is what makes a
+		// healthy page readable on disk rather than indistinguishable from a broken one.
+		assertEqual(exports.topStage({ "no-block": 0, ok: 5 }), "ok:5", "a page that resolves says so instead of naming a refusal");
+		assertEqual(exports.topStage(undefined), null, "no layer yet is reported as no trace");
+
+		const traced = {
+			b: "td-test",
+			w: "hover",
+			at: 1,
+			seen: 900,
+			inR: 888,
+			hasRegion: true,
+			chats: 1,
+			blocks: 12,
+			budget: { hover: 0, click: 5, reject: 3 },
+			trace: "no-block:2",
+			style: "s".repeat(MAX_CONTEXT_CHARS),
+			probe: { caret: "x".repeat(MAX_CONTEXT_CHARS * 5) }
+		};
+		const kept = JSON.parse(exports.fitBeacon(traced));
+		assertEqual(kept.trace, "no-block:2", "the trace survives the trim, because it is the reason for the report");
+		assert(kept.dropped.includes("probe"), "the bulky probe is what goes instead");
+		// The second exit, and the one that actually consults the keep set. Everything the drop
+		// order names already came off by now, so a field it does not name is what gets taken —
+		// and a field not kept by name goes with it. Without this half a `trace` missing from the
+		// keep set still passes, because the drop order alone fits the report.
+		const notInOrder = Object.assign({}, traced, { somethingNew: "u".repeat(MAX_CONTEXT_CHARS * 3) });
+		const thinner = JSON.parse(exports.fitBeacon(notInOrder));
+		assertEqual(thinner.trace, "no-block:2", "the stage is kept by name when nothing in the drop order can shrink");
+		assert(thinner.dropped.includes("somethingNew"), "and the unnamed field is what pays for it");
+	});
+
+
+
+	await asyncCheck("api: a stalled call is abandoned while a slow-but-live one is not", "deadline", async () => {
+		// The model path is why this matters: the host allows its model call tens of
+		// seconds, so a client that gives up after a few would report failure for a
+		// generation that actually succeeded. This drives both outcomes against a real
+		// server: one route answers inside the budget, the other never does.
+		const http = require_("node:http");
+		const { createApiClient, EXPLAIN_TIMEOUT_MS, REQUEST_TIMEOUT_MS } = loadCore("api.js");
+		assert(EXPLAIN_TIMEOUT_MS > REQUEST_TIMEOUT_MS, `the explain deadline must exceed the default budget (${EXPLAIN_TIMEOUT_MS} vs ${REQUEST_TIMEOUT_MS})`);
+		// Only `/state` ever answers. Everything else hangs, so `explain` can only
+		// finish by reaching its own deadline.
+		const server = http.createServer((req, res) => {
+			if (req.url === "/dsh-term-dictionary/state") {
+				res.setHeader("content-type", "application/json");
+				res.end(JSON.stringify({ schemaVersion: 1, entries: [] }));
+			}
+		});
+		await new Promise((ready) => server.listen(0, "127.0.0.1", ready));
+		const base = `http://127.0.0.1:${server.address().port}`;
+		try {
+			const client = createApiClient({ base, timeoutMs: 120 });
+			const answered = await client.load();
+			assert(answered.ok === true, `a live host must answer: ${JSON.stringify(answered)}`);
+
+			// The read budget is the default one.
+			const readStart = Date.now();
+			const stalled = await createApiClient({
+				base,
+				timeoutMs: 120,
+				fetchImpl: (url, init) => fetch(url.replace("/state", "/dsh-term-dictionary/stall"), init)
+			}).load();
+			const readWaited = Date.now() - readStart;
+			assertEqual(stalled.ok, false, "a stalled read is reported as a failure");
+			assert(readWaited < 1500, `the read deadline must be the default budget (waited ${readWaited}ms)`);
+
+			// `explain` must wait out the SAME server for its own budget. The assertion is
+			// on the measured wait, so dropping the deadline argument — which falls back
+			// to the 60s default — fails here instead of passing silently.
+			const explainStart = Date.now();
+			const answer = await createApiClient({ base, timeoutMs: 120, explainTimeoutMs: 900 }).explain("quorum", "context");
+			const explainWaited = Date.now() - explainStart;
+			assertEqual(answer.ok, false, "an explanation that never arrives is reported as a failure");
+			assert(
+				explainWaited >= 850 && explainWaited < 5000,
+				`explain must use its own deadline (waited ${explainWaited}ms, expected about 900ms)`
+			);
+		} finally {
+			await new Promise((done) => server.close(done));
+		}
+	});
+
+	await asyncCheck("store: the file store round-trips and survives a corrupt file", "store", async () => {
+		const fs = require_("node:fs");
+		const os = require_("node:os");
+		const path = require_("node:path");
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "term-dict-"));
+		const file = path.join(dir, "dictionary.json");
+		const store = dictionaryModule.createFileStore(fs, file, console);
+		let state = dictionaryModule.emptyState({ now: 1 });
+		state = dictionaryModule.recordSighting(state, { term: "persisted" }, { now: 2 }).state;
+		await store.save(state);
+		assert(existsSync(file), "the dictionary file must exist after save");
+		const reloaded = store.load();
+		assertEqual(reloaded.entries.length, 1, "the entry must round-trip through the file");
+		assertEqual(reloaded.entries[0].term, "persisted", "the reloaded term");
+		const onDisk = JSON.parse(readFileSync(file, "utf8"));
+		assertEqual(onDisk.schemaVersion, 1, "the file carries a schema version");
+		// A corrupt file must degrade to empty rather than throw.
+		fs.writeFileSync(file, "{ this is not json", "utf8");
+		assertEqual(store.load().entries.length, 0, "a corrupt file yields an empty dictionary");
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+}
+
+/**
+ * Run one awaited check, honouring the CLI filter.
+ * @param name - the check's name.
+ * @param keyword - the bare keyword the filter may name instead.
+ * @param fn - the async body.
+ * @returns a promise settling when the check has run.
+ */
+async function asyncCheck(name, keyword, fn) {
+	if (filter !== "" && !name.includes(filter) && !keyword.includes(filter)) return;
+	try {
+		await fn();
+		passed++;
+		console.log(`  ok   ${name}`);
+	} catch (error) {
+		failed++;
+		failures.push({ name, error });
+		console.log(`  FAIL ${name}\n       ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+await asyncChecks();
+
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) {
+	for (const failure of failures) {
+		console.error(`\n${failure.name}\n${failure.error instanceof Error ? failure.error.stack : String(failure.error)}`);
+	}
+	process.exit(1);
+}

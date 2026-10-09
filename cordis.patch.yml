@@ -1,0 +1,14 @@
+# Patch layer of the `dsh-plugin-term-dictionary` bundle.
+#
+# One row only: the package's own host half. The browser half is not a row —
+# `dsh.client` in package.json declares it, so the Client module system picks
+# the bundle up and loads `exports["./client"]` on the page.
+#
+# The host half owns the dictionary file and the HTTP surface the page reads.
+# `webServer` is optional in `inject`: in a deployment without the Web carrier
+# the host half stays dormant and the browser half keeps working from local
+# storage.
+
+- insert:
+    - id: term-dictionary
+      name: 'dsh-plugin-term-dictionary'

@@ -1,0 +1,12 @@
+# Scratch and local state. The package's parent holds `.tmp/`, `.backups/` and friends; nothing
+# outside this directory is part of the repository.
+.tmp/
+node_modules/
+*.tgz
+*.log
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

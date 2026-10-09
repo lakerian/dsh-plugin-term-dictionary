@@ -1,0 +1,4 @@
+{
+  "//": "Scope marker, not a package. The plugin package is ESM (`\"type\": \"module\"`), so a plain `.js` under lib/ would be parsed as a module — which breaks both the host half's imports and the browser bundle's need for callable module.exports values. Declaring the type in this subdirectory keeps the core CommonJS while lib/index.js stays ESM. Renaming to .cjs is not an option: the client bundle's own require cannot resolve either spelling at runtime.",
+  "type": "commonjs"
+}
