@@ -44,6 +44,7 @@ const MODULES = [
 	"interact.js",
 	"highlight.js",
 	"hover.js",
+	"selection.js",
 	"hovercard.js",
 	"bus.js",
 	"styles.js",

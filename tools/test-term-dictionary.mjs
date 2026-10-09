@@ -1513,6 +1513,28 @@ test("entries: an entry reads as the text somebody would paste", () => {
 	assertEqual(withMetadata, "WAL\ng", "aliases and the domain stay out of the pasted text");
 });
 
+test("selection: one shared answer, aware of carets, whitespace and which host was asked", () => {
+	// Three call sites ask this question — the panel's rows, the annotated-term click and the
+	// unannotated-word click — and the rule lives here so they cannot drift. The bug it prevents is
+	// always the same shape: a click that FINISHES a selection is treated as a click that CHOOSES.
+	const { selectionActive, selectionInside, readSelection } = loadCore("selection.js");
+	assertEqual(selectionActive({ getSelection: () => ({ isCollapsed: true, toString: () => "x" }) }), false, "a collapsed caret is not a selection");
+	assertEqual(selectionActive({ getSelection: () => ({ isCollapsed: false, toString: () => "  \n " }) }), false, "nor is whitespace");
+	assertEqual(selectionActive({ getSelection: () => ({ isCollapsed: false, toString: () => "quorum" }) }), true, "text is");
+	assertEqual(selectionActive({}), false, "and a host with no selection of its own falls back rather than throwing");
+	assertEqual(selectionActive(undefined), false, "including no host at all");
+	const chosen = { isCollapsed: false, toString: () => "chosen" };
+	assertEqual(readSelection({ getSelection: () => chosen }), chosen, "the host it was given is the one read");
+	assertEqual(selectionActive({ getSelection: () => null }), false, "a host answering null falls through to the page's own");
+
+	// The panel's narrower question: inside THIS element, or somewhere else on the page.
+	const element = { contains: (node) => node === "inside" };
+	assertEqual(selectionInside(element, { getSelection: () => ({ isCollapsed: false, toString: () => "x", anchorNode: "inside" }) }), true, "a selection inside the element counts");
+	assertEqual(selectionInside(element, { getSelection: () => ({ isCollapsed: false, toString: () => "x", anchorNode: "outside" }) }), false, "one outside it does not");
+	assertEqual(selectionInside(element, { getSelection: () => ({ isCollapsed: false, toString: () => "x" }) }), false, "and a selection with no node to place is not inside anything");
+	assertEqual(selectionInside(null, { getSelection: () => ({ isCollapsed: false, toString: () => "x" }) }), false, "no element is no selection");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
@@ -3252,6 +3274,68 @@ async function asyncChecks() {
 		await wait(90);
 		assertEqual(kind(), "closed", "while leaving again really does close it, after the grace period");
 
+		layer.detach();
+	});
+
+	await asyncCheck("hover: a click that ends a selection does not switch the panel", "hoverSelection", async () => {
+		// The defect: this layer handles the words the dictionary already KNOWS, which are exactly the
+		// words a person drags across while copying a sentence out of a reply — and releasing on one
+		// switched the whole main region to the dictionary, replacing the sentence being copied with an
+		// entry page. `interact.js` had this guard from the start; the annotated-term path was added
+		// later without it. Both now ask `selection.js`.
+		const { createHoverLayer } = loadCore("hover.js");
+		const text = { nodeType: 3, nodeValue: "A quorum decides.", parentElement: null, childNodes: [] };
+		const onTerm = { node: text, start: 2, end: 8, term: "quorum", key: "quorum", id: "" };
+		const zone = { classList: { add: () => {}, remove: () => {} } };
+		const target = { closest: () => zone };
+		const listeners = {};
+		let selection = { isCollapsed: true, toString: () => "" };
+		const documentStub = {
+			getSelection: () => selection,
+			caretRangeFromPoint: () => ({ startContainer: text, startOffset: 4 }),
+			addEventListener: (type, handler) => {
+				(listeners[type] ??= []).push(handler);
+			},
+			removeEventListener: () => {},
+			createRange: () => ({
+				setStart: () => {},
+				setEnd: () => {},
+				getBoundingClientRect: () => ({ left: 0, top: 0, right: 10, bottom: 10, width: 10, height: 10 })
+			})
+		};
+		const activated = [];
+		const layer = createHoverLayer({
+			document: documentStub,
+			segments: () => [onTerm],
+			delays: () => ({ inMs: 0, outMs: 0 }),
+			disposers: [],
+			onActivate: (segment) => activated.push(segment.term)
+		});
+		layer.attach();
+		const click = () => {
+			for (const handler of listeners.click ?? []) handler({ button: 0, clientX: 5, clientY: 5, target });
+		};
+
+		// A plain click on the term still opens the entry: the guard must not disable the gesture it
+		// is guarding, which is how a fix for this kind of bug turns into a new bug.
+		click();
+		assertEqual(activated, ["quorum"], "a click with nothing selected still opens the term");
+
+		// The same click, with the sentence selected: that is a copy, not a navigation.
+		selection = { isCollapsed: false, toString: () => "A quorum decides." };
+		click();
+		assertEqual(activated, ["quorum"], "a click that ends a selection must not open the entry");
+
+		// Whitespace is not a selection gesture either — dragging across the spaces after a sentence is
+		// not a copy anybody is making, and it must not silently eat the activation.
+		selection = { isCollapsed: false, toString: () => "   \n " };
+		click();
+		assertEqual(activated, ["quorum", "quorum"], "a whitespace-only selection is not a selection gesture");
+
+		// And the modifier keys keep their meaning, selection or not.
+		selection = { isCollapsed: true, toString: () => "" };
+		for (const handler of listeners.click ?? []) handler({ button: 0, clientX: 5, clientY: 5, target, metaKey: true });
+		assertEqual(activated.length, 2, "the modifier checks still come first");
 		layer.detach();
 	});
 

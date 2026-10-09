@@ -283,6 +283,34 @@ const mutations = [
 		filter: "copyEntry"
 	},
 	{
+		name: "the annotated-term click ignores a selection and switches the panel anyway",
+		file: "lib/core/hover.js",
+		find: "\t\tif (selectionActive(doc)) return;",
+		replace: "\t\tif (false) return;",
+		filter: "hoverSelection"
+	},
+	{
+		name: "a whitespace-only selection counts as a selection gesture",
+		file: "lib/core/selection.js",
+		find: '\treturn selection.toString().trim() !== "";',
+		replace: '\treturn selection.toString() !== "";',
+		filter: "one shared answer"
+	},
+	{
+		name: "the caret check is dropped, so a collapsed selection counts as one",
+		file: "lib/core/selection.js",
+		find: "\tif (selection.isCollapsed === true) return false;",
+		replace: "\tif (false) return false;",
+		filter: "one shared answer"
+	},
+	{
+		name: "the panel stops asking where the selection is",
+		file: "lib/core/selection.js",
+		find: "\treturn element.contains(node) === true;",
+		replace: "\treturn node !== null;",
+		filter: "one shared answer"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',
