@@ -115,10 +115,17 @@ async function startHost(options = {}) {
 		},
 		on: () => () => {},
 		get: () => undefined,
-		inject(_deps, callback) {
-			// No model service in this harness: the plugin must still activate and
-			// must report a missing model rather than throwing.
-			void callback;
+		inject(deps, callback) {
+			// A service is offered only when the harness was handed one. With none, the plugin must
+			// still activate and must report the missing service rather than throwing — that is the
+			// whole point of the optional child context the host half uses for `llm`,
+			// `agentDefaultModel` and the feedback channel.
+			const wanted = Array.isArray(deps) ? deps : [];
+			const provided = options.services ?? {};
+			if (wanted.length === 0 || wanted.some((name) => provided[name] === undefined)) return () => {};
+			const child = { ...context };
+			for (const name of wanted) child[name] = provided[name];
+			callback(child);
 			return () => {};
 		}
 	};
@@ -449,6 +456,89 @@ async function main() {
 				/* already closed */
 			}
 			rmSync(ownDir, { recursive: true, force: true });
+		}
+	});
+
+	//#endregion
+
+	//#region the host's own feedback channel
+
+	// The channel is a HOST service reached through an optional child context, not a client remote: a
+	// live desktop profile was measured with no `remote` service at all, so declaring the client-side
+	// projection would have parked the whole plugin waiting for a service that never arrives.
+	test("feedback: a composition without the channel says so instead of failing", async () => {
+		const host = await startHost({ dataDir: dir });
+		try {
+			const answer = await post(`${host.url}/dsh-term-dictionary/feedback`, { sessionId: "s-1", text: "一条备注" });
+			assertEqual(answer.status, 200, "a missing channel is a normal answer, not an HTTP error");
+			assertEqual(answer.body, { ok: false, error: "unavailable" }, "and it names the state the page shows");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("feedback: a remark reaches the host channel as the host declares it", async () => {
+		const seen = [];
+		const host = await startHost({
+			dataDir: dir,
+			services: { sessionFeedback: { record: async (request) => { seen.push(request); return { ok: true, value: { recorded: true } }; } } }
+		});
+		try {
+			const answer = await post(`${host.url}/dsh-term-dictionary/feedback`, { sessionId: "s-1", text: "术语词典: 1 — Quorum(解释不对)", category: "product-interaction" });
+			assertEqual(answer.status, 200, "the route answers");
+			assertEqual(answer.body, { ok: true }, "and reports the remark as recorded");
+			assertEqual(seen.length, 1, "the host saw exactly one remark");
+			assertEqual(seen[0], { sessionId: "s-1", text: "术语词典: 1 — Quorum(解释不对)", category: "product-interaction" }, "with the request shape the host declares");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("feedback: the route validates the session id, the category and the length", async () => {
+		const seen = [];
+		const host = await startHost({
+			dataDir: dir,
+			services: { sessionFeedback: { record: async (request) => { seen.push(request); return { ok: true, value: { recorded: true } }; } } }
+		});
+		try {
+			// A remark is about a session: without one there is nothing to record it against.
+			const noSession = await post(`${host.url}/dsh-term-dictionary/feedback`, { text: "没有会话" });
+			assertEqual([noSession.status, seen.length], [400, 0], "a missing session id is refused before the host is bothered");
+			// The category is a closed set on the host's side too, so an unknown id must not be passed on.
+			const unknown = await post(`${host.url}/dsh-term-dictionary/feedback`, { sessionId: "s-1", text: "x", category: "made-up" });
+			assertEqual(unknown.status, 200, "an unknown category is not an error");
+			assertEqual(seen[seen.length - 1].category, "product-interaction", "it falls back to the one a dictionary remark belongs to");
+			// And a runaway text cannot fill the host's session log.
+			await post(`${host.url}/dsh-term-dictionary/feedback`, { sessionId: "s-1", text: "y".repeat(900) });
+			assertEqual(seen[seen.length - 1].text.length, 500, "the text is capped at what a remark is");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("feedback: a session the host no longer has is reported as such", async () => {
+		const host = await startHost({
+			dataDir: dir,
+			services: {
+				sessionFeedback: {
+					record: async (request) => ({ ok: false, error: { code: "session-not-found", sessionId: request.sessionId } })
+				}
+			}
+		});
+		try {
+			const answer = await post(`${host.url}/dsh-term-dictionary/feedback`, { sessionId: "gone", text: "x" });
+			assertEqual([answer.status, answer.body], [200, { ok: false, error: "session-not-found" }], "the one failure worth naming is named");
+		} finally {
+			await host.close();
+		}
+		// And a channel that throws is reported as a refusal rather than taking the route down.
+		const broken = await startHost({ dataDir: dir, services: { sessionFeedback: { record: async () => { throw new Error("channel is broken"); } } } });
+		try {
+			const answer = await post(`${broken.url}/dsh-term-dictionary/feedback`, { sessionId: "s-1", text: "x" });
+			assertEqual(answer.status, 502, "a throwing channel is a 502");
+			assert(String(answer.body?.error ?? "").includes("broken"), "and its own message is passed on rather than swallowed");
+		} finally {
+			await broken.close();
 		}
 	});
 

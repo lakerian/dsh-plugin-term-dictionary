@@ -304,8 +304,15 @@ background: "var(--dsw-alias-brand-primary, #4d6bfe)",
 这不是一个可以勾选的选项，是构造上就没有这个字段。**当前解释要另外勾选才附上**（默认不附），因为
 它是模型写的、往往正是被抱怨的东西，但它仍然不是用户的话。
 
-另外还有一条**不属于**上面任何一条：宿主自己的反馈通道（`sessionFeedback.record`，进会话日志、
-永不进模型上下文）。它记在**这台机器**上，所以它到不了作者手里——内容级反馈必须靠报告带出去。
+另外还有一条**走的不是这个页面**：宿主自己的反馈通道。它记在**这台机器**的会话日志里、不进模型上下文，所以它到不了作者手里——内容级反馈必须靠报告带出去。这条通道是**宿主服务**（`sessionFeedback`），不是客户端的 remote：页面的 `remote.sessionFeedback` 需要写进客户端 `inject`，而一个永远不来的服务会把**整个包挂起**（面板、下划线、所有手势一起消失）。实测这台机器的桌面端**根本没有 `remote` 服务**，所以那样写就等于在自己写代码的机器上把插件杀死。宿主半边用的是运行时给出的可选写法——`ctx.inject(["sessionFeedback"], …)`，和 `llm`、`agentDefaultModel` 同一个模式：服务在就接上，不在就由页面如实报告"这个组合没有反馈通道"（报告照样能导出）。
+
+```
+POST /dsh-term-dictionary/feedback   { sessionId, text, category }
+  → { ok: true }
+  → { ok: false, error: "unavailable" }       这个组合没有反馈通道
+  → { ok: false, error: "session-not-found" } 宿主已经没有这个会话了
+```
+页面对这几种结果分别给不同的话，不合并成一句"失败了"：`unavailable` 是"这个版本做不到"，`session-not-found` 是"那个会话没了"，`no-session` 是"还没看到过会话，先回对话里点一下"。
 
 ## 面板的五个视图与两个二级页
 

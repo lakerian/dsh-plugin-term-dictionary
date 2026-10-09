@@ -208,6 +208,60 @@ const mutations = [
 		filter: "markEntry"
 	},
 	{
+		name: "the feedback route records without a channel",
+		file: "lib/index.js",
+		find: '\t\tif (feedback === null) return sendJson(res, 200, { ok: false, error: "unavailable" });',
+		replace: "\t\tif (feedback === null) void 0;",
+		filter: "feedback:",
+		suite: "host"
+	},
+	{
+		name: "the feedback route passes an unknown category straight to the host",
+		file: "lib/index.js",
+		find: 'const category = FEEDBACK_CATEGORIES.includes(body.category) ? body.category : "product-interaction";',
+		replace: "const category = body.category;",
+		filter: "feedback:",
+		suite: "host"
+	},
+	{
+		name: "the feedback route records a remark with no session to attach it to",
+		file: "lib/index.js",
+		find: '\t\tif (sessionId === "") return sendJson(res, 400, { error: "sessionId is required" });',
+		replace: "\t\tif (sessionId === \"\") void 0;",
+		filter: "feedback:",
+		suite: "host"
+	},
+	{
+		name: "the feedback route forwards a runaway remark",
+		file: "lib/index.js",
+		find: 'const text = typeof body.text === "string" ? body.text.trim().slice(0, MAX_FEEDBACK_CHARS) : "";',
+		replace: 'const text = typeof body.text === "string" ? body.text.trim() : "";',
+		filter: "feedback:",
+		suite: "host"
+	},
+	{
+		name: "a dropped session is not told apart from a channel that refused",
+		file: "lib/index.js",
+		find: 'return sendJson(res, 200, { ok: false, error: outcome?.error?.code === "session-not-found" ? "session-not-found" : "rejected" });',
+		replace: 'return sendJson(res, 200, { ok: false, error: "rejected" });',
+		filter: "feedback:",
+		suite: "host"
+	},
+	{
+		name: "the page sends an empty session id instead of asking for a conversation",
+		file: "lib/core/views.js",
+		find: 'if (sessionId === "") {\n\t\t\tsetFeedbackState("no-session");\n\t\t\treturn;\n\t\t}',
+		replace: "if (sessionId === \"\") void 0;",
+		filter: "feedbackReport"
+	},
+	{
+		name: "the client drops the session id it was handed",
+		file: "lib/core/api.js",
+		find: 'sessionId: typeof input?.sessionId === "string" ? input.sessionId : "",',
+		replace: 'sessionId: "",',
+		filter: "feedbackApi"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',
@@ -234,7 +288,8 @@ for (const mutation of mutations) {
 		detail = `build exit ${build.code}`;
 	} else {
 		if (mutation.expectBuildFailure === true) throw new Error(`${mutation.name}: the build still succeeded`);
-		const test = run(["tools/test-term-dictionary.mjs", "--filter", mutation.filter]);
+		const suite = mutation.suite === "host" ? "tools/test-host-routes.mjs" : "tools/test-term-dictionary.mjs";
+		const test = run([suite, "--filter", mutation.filter]);
 		caught = test.code !== 0;
 		const failing = test.out.split("\n").filter((line) => line.includes("FAIL")).map((line) => line.trim());
 		detail = failing.length > 0 ? failing.slice(0, 2).join(" | ") : `test exit ${test.code}`;

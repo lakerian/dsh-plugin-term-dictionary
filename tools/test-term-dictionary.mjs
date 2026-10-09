@@ -2750,6 +2750,70 @@ async function asyncChecks() {
 		const withGloss = copyReport(renderPage());
 		assertEqual(withGloss.entries[0].gloss, "多数派确认", "ticking it attaches the explanation");
 		assertEqual("context" in withGloss.entries[0], false, "while the conversation stays out either way");
+
+		// The host's own channel: what it sends, and the six states the page can report.
+		// The state is read from what the user is SHOWN (the translated text), not from the attribute —
+		// an attribute that says "ok" while the label is missing is exactly the failure worth catching.
+		const stateOf = (tree) => {
+			const node = find(tree, (each) => typeof each.props?.["data-term-feedback-state"] === "string")[0];
+			if (node === undefined) return null;
+			return typeof node.props.children === "string" ? node.props.children : `${node.props.children}`;
+		};
+		const recordButton = (tree) => find(tree, (node) => node.props?.label === "feedbackRecord" && typeof node.props.onClick === "function")[0];
+		const sent = [];
+		let sessionId = "sess-1";
+		let reply = { ok: true };
+		const props2 = {
+			store: face.store,
+			t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`),
+			setToast: () => {},
+			sessionId: () => sessionId,
+			recordFeedback: async (input) => {
+				sent.push(input);
+				return reply;
+			}
+		};
+		const render2 = () => {
+			react.__beginRender();
+			return bundle.exports.transferPage(props2);
+		};
+		assertEqual(stateOf(render2()), null, "nothing is claimed before anything is sent");
+		recordButton(render2()).props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(sent.length, 1, "the button reaches the host's channel");
+		assertEqual(sent[0].sessionId, "sess-1", "with the session the page was told about");
+		assertEqual(sent[0].category, "product-interaction", "and the category a dictionary remark belongs to");
+		assert(sent[0].text.includes("Quorum"), `the line must name the entry, saw ${sent[0].text}`);
+		assert(sent[0].text.includes("太笼统"), "and carry the user's own words");
+		assert(sent[0].text.includes("Plain") === false, "while unflagged entries stay out of it");
+		assertEqual(stateOf(render2()), "feedbackState_ok", "and the page says it was recorded");
+
+		// No conversation seen yet is NOT the same as a session the host dropped: one is "open the chat
+		// first", the other is "that session is gone", and the page must not blame the wrong one.
+		sessionId = "";
+		sent.length = 0;
+		recordButton(render2()).props.onClick();
+		await drainMicrotasks();
+		assertEqual(sent.length, 0, "an empty session id is not posted at all");
+		assertEqual(stateOf(render2()), "feedbackState_no-session", "and the page asks for a conversation rather than blaming the session");
+
+		sessionId = "sess-1";
+		reply = { ok: false, error: "unavailable" };
+		recordButton(render2()).props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(stateOf(render2()), "feedbackState_unavailable", "a composition with no channel says exactly that");
+		reply = { ok: false, error: "session-not-found" };
+		recordButton(render2()).props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(stateOf(render2()), "feedbackState_session-not-found", "and a dropped session says that instead");
+		reply = { ok: false, error: "whatever" };
+		recordButton(render2()).props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(stateOf(render2()), "feedbackState_failed", "anything else is a refusal, reported as one");
 	});
 
 	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {
@@ -3133,6 +3197,34 @@ async function asyncChecks() {
 		assertEqual(String(stored.context).length, long.length, `a ${long.length}-character context must be posted whole, saw ${String(stored.context).length}`);
 		assert(String(stored.context).endsWith("the part a cap eats"), "the client must not trim the tail it was handed");
 		assertEqual([stored.lang, stored.depth], ["en", "detailed"], "and the explanation preferences must travel with it");
+	});
+
+	await asyncCheck("api: the feedback call posts the fields the host declares, and reads its answer", "feedbackApi", async () => {
+		// The host answers a refusal with HTTP 200 and `{ok: false, error}` — a composition without the
+		// channel is a normal state, not a transport failure — so the client has to read the BODY rather
+		// than the status, and the page's six states depend on that mapping being right.
+		const { createApiClient } = loadCore("api.js");
+		let sent = null;
+		let answer = { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ ok: true })) };
+		const client = createApiClient({
+			base: "http://127.0.0.1",
+			fetchImpl: (url, init) => {
+				if (String(url).includes("/feedback")) sent = JSON.parse(init.body);
+				return Promise.resolve(answer);
+			}
+		});
+		assertEqual(await client.feedback({ sessionId: "s-1", text: "一条备注", category: "product-interaction" }), { ok: true }, "a recorded remark answers ok");
+		assertEqual(sent, { sessionId: "s-1", text: "一条备注", category: "product-interaction" }, "and the three fields travel as declared");
+
+		sent = null;
+		await client.feedback({ text: "没有会话" });
+		assertEqual(sent.sessionId, "", "a missing session id is posted empty rather than dropped");
+		assertEqual(sent.category, "product-interaction", "and the category carries a default the host validates");
+
+		answer = { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ ok: false, error: "unavailable" })) };
+		assertEqual(await client.feedback({ sessionId: "s-1" }), { ok: false, error: "unavailable" }, "a composition without the channel is reported as such");
+		answer = { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ ok: false })) };
+		assertEqual(await client.feedback({ sessionId: "s-1" }), { ok: false, error: "rejected" }, "and an unlabelled refusal still says refused");
 	});
 
 	await asyncCheck("beacon: an oversized report names what it dropped instead of being cut", "beaconFit", async () => {
