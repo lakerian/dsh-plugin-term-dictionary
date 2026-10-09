@@ -1492,6 +1492,27 @@ test("transfer: the feedback report says what was said, and never the conversati
 	assertEqual(buildFeedbackReport([], { now: 42 }).entries.length, 0, "nothing flagged is an empty report, not a missing one");
 });
 
+test("entries: an entry reads as the text somebody would paste", () => {
+	// Copying by selecting text is a moving target — the list re-sorts as sightings arrive, and the
+	// click that ends a selection used to open the editor over it — so copying is a button that needs
+	// no selection. This is the text that button writes, and its shape is the whole point: what a
+	// person would paste into a conversation, not a record dump.
+	const { entryAsText } = loadCore("entries.js");
+	assertEqual(
+		entryAsText({ term: "Quorum", definition: { zh: "多数派确认", gloss: "写入需要多少个副本确认。", usage: "reached quorum" } }),
+		"Quorum（多数派确认）\n写入需要多少个副本确认。\n例：reached quorum",
+		"term, name, explanation and an example"
+	);
+	assertEqual(entryAsText({ term: "Quorum", definition: { zh: "", gloss: "", usage: "" } }), "Quorum", "a term with nothing else is still a term");
+	assertEqual(entryAsText({ term: "Quorum", definition: { zh: "多数派确认", gloss: "", usage: "" } }), "Quorum（多数派确认）", "and a name without an explanation keeps the name");
+	assertEqual(entryAsText({ term: "", definition: { gloss: "x" } }), "", "nothing to copy is empty rather than a blank line");
+	assertEqual(entryAsText(null), "", "and a missing entry does not throw");
+	// Aliases and the domain are lookup metadata: a reader searching the panel uses them, and nobody
+	// pasting an entry wants them in the middle of the sentence.
+	const withMetadata = entryAsText({ term: "WAL", definition: { gloss: "g" }, aliases: ["write-ahead log"], domain: "数据库" });
+	assertEqual(withMetadata, "WAL\ng", "aliases and the domain stay out of the pasted text");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
@@ -2814,6 +2835,69 @@ async function asyncChecks() {
 		await drainMicrotasks();
 		await drainMicrotasks();
 		assertEqual(stateOf(render2()), "feedbackState_failed", "anything else is a refusal, reported as one");
+	});
+
+	await asyncCheck("panel: copying an entry is a button, and the click that ends a selection is left alone", "copyEntry", async () => {
+		// The defect this covers: double-clicking a word in the gloss to copy it opened the editor on
+		// top of the selection, so the copy was gone before it could be made. Two fixes, both asserted
+		// here — a copy action that needs no selection at all, and a row that keeps its hands off a
+		// click which just finished one.
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { zh: "多数派确认", gloss: "写入需要多少个副本确认。", usage: "reached quorum" } });
+		const copied = [];
+		bundle.sandbox.navigator = { clipboard: { writeText: async (text) => { copied.push(text); } } };
+		const props = { ...face, t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`), setToast: () => {} };
+		const renderPanel = () => {
+			react.__beginRender();
+			return bundle.components[index](props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+		const rowCopy = () => find(renderPanel(), (node) => node.props?.title === "copyEntry" && typeof node.props.onClick === "function")[0];
+		assert(rowCopy() !== undefined, "each row must offer copying without a selection");
+		rowCopy().props.onClick();
+		await drainMicrotasks();
+		assertEqual(copied.length, 1, "pressing it writes to the clipboard");
+		assertEqual(copied[0], "Quorum（多数派确认）\n写入需要多少个副本确认。\n例：reached quorum", "with the entry as readable text");
+
+		// The row's whole-block click, with a selection inside it.
+		const row = () => find(renderPanel(), (node) => node.props?.["data-term-entry"] === "quorum" && typeof node.props.onClick === "function")[0];
+		const rowElement = { contains: (node) => node === "gloss-node" };
+		const editorOpen = () => find(renderPanel(), (node) => node.props?.label === "glossLabel").length > 0;
+		bundle.sandbox.getSelection = () => ({ toString: () => "写入需要多少", anchorNode: "gloss-node" });
+		row().props.onClick({ target: { closest: () => null }, currentTarget: rowElement });
+		assertEqual(editorOpen(), false, "a click that ends a selection inside the row must not open the editor");
+
+		// A selection somewhere ELSE is not this row's business: clicking a row right after selecting
+		// part of a reply is still a click on the row.
+		bundle.sandbox.getSelection = () => ({ toString: () => "part of a reply", anchorNode: "reply-node" });
+		row().props.onClick({ target: { closest: () => null }, currentTarget: rowElement });
+		assertEqual(editorOpen(), true, "but a selection outside the row does not swallow the click");
+
+		// The editor's own copy takes what is on the FORM: the text somebody just wrote, saved or not.
+		find(renderPanel(), (node) => node.props?.label === "glossLabel" && typeof node.props.onChange === "function")[0].props.onChange("改过的解释");
+		copied.length = 0;
+		const editorCopy = find(renderPanel(), (node) => node.props?.label === "copyEntry" && typeof node.props.onClick === "function")[0];
+		assert(editorCopy !== undefined, "the editor must offer copying too");
+		editorCopy.props.onClick();
+		await drainMicrotasks();
+		assertEqual(copied[0], "Quorum（多数派确认）\n改过的解释\n例：reached quorum", "including the edit that has not been saved yet");
 	});
 
 	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {

@@ -262,6 +262,27 @@ const mutations = [
 		filter: "feedbackApi"
 	},
 	{
+		name: "the pasted text loses the explanation",
+		file: "lib/core/entries.js",
+		find: '\tif (definition.gloss !== undefined && definition.gloss !== "") lines.push(definition.gloss);',
+		replace: "\tif (false) lines.push(definition.gloss);",
+		filter: "reads as the text"
+	},
+	{
+		name: "a click that ends a selection opens the editor over it",
+		file: "lib/core/views.js",
+		find: "\t\t\t\t\t\t\t\tif (selectionInside(event?.currentTarget)) return;",
+		replace: "\t\t\t\t\t\t\t\tif (false) return;",
+		filter: "copyEntry"
+	},
+	{
+		name: "the row loses its copy action",
+		file: "lib/core/views.js",
+		find: '\t\t\t\t\t\t\th(IconButton, { title: t("copyEntry"), onClick: () => void copyEntry(entry) }, Icons.copy(13)),',
+		replace: "",
+		filter: "copyEntry"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',
