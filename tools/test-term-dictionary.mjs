@@ -1679,6 +1679,40 @@ test("panel: the entry list's layout follows the column preference", () => {
 	assertEqual(listOf(renderPanel())?.props["data-term-columns"], "auto", "an impossible count is normalised to the default by the store");
 });
 
+test("transfer: a folder is read as one import, and it names what it could not use", () => {
+	// The shape people actually keep is one folder per topic, with whatever else in it. So a folder import
+	// has to be tolerant in two directions: files that are not JSON are not mistakes, and files that cannot
+	// be read are named rather than swallowing the whole folder.
+	const { collectFolderImport } = loadCore("transfer.js");
+	const dictionary = JSON.stringify({ kind: "dsh-term-dictionary", version: 1, entries: [{ term: "Quorum", key: "quorum", definition: { gloss: "g" } }] });
+	const packFile = JSON.stringify({ kind: "dsh-term-dictionary-pack", version: 1, id: "a/b", name: "B", entries: [{ term: "Sidecar", key: "sidecar", definition: { gloss: "s" }, domain: "架构" }] });
+	const indexFile = JSON.stringify({ kind: "dsh-term-dictionary-index", version: 1, packs: [] });
+	const files = [
+		{ path: "topics/backend.json", text: dictionary },
+		{ path: "topics/infra.json", text: packFile },
+		{ path: "topics/notes.md", text: "not json, and not a mistake" },
+		{ path: "topics/index.json", text: indexFile },
+		{ path: "broken.json", text: "{" }
+	];
+
+	const plain = collectFolderImport(files, {});
+	// `index.json` lists packs rather than holding entries, and a file that is not JSON at all is reported
+	// as that: both are skipped, and nothing else is.
+	assertEqual([plain.files, plain.used], [4, 2], "four .json files were found and two were usable");
+	assertEqual(plain.entries.map((entry) => entry.key).sort(), ["quorum", "sidecar"], "and their entries are what comes back");
+	assertEqual(plain.skipped.map((entry) => entry.name).sort(), ["broken.json", "topics/index.json"], "the unusable ones are named");
+	assertEqual(plain.skipped.map((entry) => entry.error).sort(), ["no-entries", "not-json"], "with the reason each one failed");
+	assertEqual(plain.entries.find((entry) => entry.key === "quorum").domain, "", "and no category is invented for an entry that had none");
+	assertEqual(plain.entries.find((entry) => entry.key === "sidecar").domain, "架构", "while one the file named keeps its own");
+
+	const withFolders = collectFolderImport(files, { useFolderAsDomain: true });
+	assertEqual(withFolders.entries.find((entry) => entry.key === "quorum").domain, "topics", "the folder names the category");
+	assertEqual(withFolders.entries.find((entry) => entry.key === "sidecar").domain, "架构", "unless the file already named one, which wins");
+	const nothingUsable = collectFolderImport([{ path: "broken.json", text: "{" }], { useFolderAsDomain: true });
+	assertEqual([nothingUsable.used, nothingUsable.entries.length, nothingUsable.skipped.length], [0, 0, 1], "a folder with nothing usable reports that rather than importing nothing quietly");
+	assertEqual(collectFolderImport([], {}).files, 0, "and an empty folder is not an error in itself");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
@@ -3272,6 +3306,86 @@ async function asyncChecks() {
 		assertEqual(of("fetch").length, 1, "previewing fetches that pack");
 		assertEqual(of("fetch")[0].sha256, "b".repeat(64), "carrying the digest the index promised");
 		assertEqual(find(render(), (node) => node.props?.["data-term-pack-preview"] === "true").length, 1, "and it is previewed like a code is");
+	});
+
+	await asyncCheck("panel: an import says when the view had to move to show what it wrote", "importMoved", async () => {
+		// The complaint this answers: "the imported entries do not appear". The data path is fine — the
+		// store and the host both keep them (see the host suite's round-trip check) — but a list filtered to
+		// 「已删除」 or narrowed by a search shows nothing after an import, which reads as "it did nothing".
+		// So the page asks the panel to show them, and the report says whether it had to move.
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { gloss: "本地解释" } });
+
+		let asked = 0;
+		let answer = true;
+		const props = {
+			store: face.store,
+			t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`),
+			setToast: () => {},
+			onImported: () => {
+				asked++;
+				return answer;
+			}
+		};
+		const renderPage = () => {
+			react.__beginRender();
+			return bundle.exports.transferPage(props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				if (typeof node.type === "function") {
+					walk(node.type(node.props));
+					return;
+				}
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+		const reportText = (tree) => {
+			const parts = [];
+			const gather = (node) => {
+				if (typeof node === "string" || typeof node === "number") parts.push(String(node));
+				else if (Array.isArray(node)) node.forEach(gather);
+				else if (node !== null && typeof node === "object") gather(node.props?.children);
+			};
+			gather(find(tree, (node) => typeof node.props?.["data-term-report"] !== "undefined")[0]);
+			return parts.join(" | ");
+		};
+		const file = (text) => ({ name: "d.json", text: async () => text });
+		const pick = { target: { files: [file(JSON.stringify({ kind: "dsh-term-dictionary", version: 1, entries: [{ term: "Sidecar", key: "sidecar", definition: { gloss: "来自文件" } }] }))] } };
+		const confirm = (tree) => find(tree, (node) => node.props?.label === "transferConfirm" && typeof node.props.onClick === "function")[0];
+		const fileInput = (tree) => find(tree, (node) => node.props?.type === "file" && node.props?.["data-term-dictionary"] !== "transfer-folder")[0];
+
+		fileInput(renderPage()).props.onChange(pick);
+		await drainMicrotasks();
+		await drainMicrotasks();
+		confirm(renderPage()).props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(asked, 1, "the page asks the panel to show what was imported");
+		assert(String(reportText(renderPage())).includes("transferShown"), "and says so when the panel had to move");
+
+		// And when nothing had to move, it does not claim otherwise.
+		answer = false;
+		fileInput(renderPage()).props.onChange(pick);
+		await drainMicrotasks();
+		await drainMicrotasks();
+		confirm(renderPage()).props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(String(reportText(renderPage())).includes("transferShown"), false, "with no false claim when the view was already where it should be");
 	});
 
 	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {

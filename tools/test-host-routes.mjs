@@ -836,6 +836,42 @@ async function main() {
 
 	//#endregion
 
+	//#region an import, through the host
+
+	test("import: an entry revived by an import survives the host round trip", async () => {
+		// The path no check covered until a user reported "the imported entries do not appear": the write
+		// the page performs is an ordinary `update`, so the question is whether the HOST keeps it — the
+		// page's own store showing the entry proves nothing if the next merge takes it away again.
+		const host = await startHost({ dataDir: dir });
+		try {
+			await post(`${host.url}/dsh-term-dictionary/entries`, { action: "record", term: "Zigzag", glossary: { gloss: "旧解释" } });
+			const seeded = await get(`${host.url}/dsh-term-dictionary/state`);
+			assert(seeded.body.entries.some((entry) => entry.term === "Zigzag"), "the term is live to begin with");
+			await post(`${host.url}/dsh-term-dictionary/entries`, { action: "remove", term: "Zigzag" });
+			const removed = await get(`${host.url}/dsh-term-dictionary/state`);
+			assertEqual(removed.body.entries.some((entry) => entry.term === "Zigzag"), false, "then the user deletes it");
+
+			// What the page sends when an import is confirmed with the opt-in ticked.
+			const updated = await post(`${host.url}/dsh-term-dictionary/entries`, { action: "update", term: "Zigzag", definition: { gloss: "来自文件" } });
+			assertEqual(updated.body.ok, true, "the import's write is accepted");
+			const after = await get(`${host.url}/dsh-term-dictionary/state`);
+			const revived = after.body.entries.find((entry) => entry.term === "Zigzag");
+			assert(revived !== undefined, "and the revived entry is live on the host");
+			assertEqual(revived.definition.gloss, "来自文件", "carrying the imported text");
+			// `serializeState` omits `deletedKeys` when there are none, so "the tombstone is gone" reads as
+			// the field being absent — which is what this check first got wrong, not the plugin.
+			assertEqual((after.body.deletedKeys ?? []).includes("zigzag"), false, "with the tombstone gone");
+
+			// Read again: the merge is the step that could quietly undo it, and one read would not show that.
+			const again = await get(`${host.url}/dsh-term-dictionary/state`);
+			assert(again.body.entries.some((entry) => entry.term === "Zigzag"), "and it survives being read again");
+		} finally {
+			await host.close();
+		}
+	});
+
+	//#endregion
+
 	await runChecks();
 
 	try {

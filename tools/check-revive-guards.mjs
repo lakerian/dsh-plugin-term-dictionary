@@ -443,9 +443,30 @@ const mutations = [
 	{
 		name: "the confirmation writes the entries instead of the ones the user saw",
 		file: "lib/core/views.js",
-		find: "\t\t\tsetReport(await importEntries(store, pending.entries, { includeDeleted, skipped: pending.skippedCount }));",
-		replace: "\t\t\tsetReport(await importEntries(store, [], { includeDeleted, skipped: pending.skippedCount }));",
+		find: "\t\t\tconst result = await importEntries(store, pending.entries, { includeDeleted, skipped: pending.skippedCount });",
+		replace: "\t\t\tconst result = await importEntries(store, [], { includeDeleted, skipped: pending.skippedCount });",
 		filter: "transferImport"
+	},
+	{
+		name: "a folder import reads files that are not JSON, and reports them as mistakes",
+		file: "lib/core/transfer.js",
+		find: "\t\tif (!/\\.json$/i.test(path)) continue;",
+		replace: "\t\tif (false) continue;",
+		filter: "a folder is read as one import"
+	},
+	{
+		name: "a folder import overwrites a category the file itself named",
+		file: "lib/core/transfer.js",
+		find: '\t\t\tentries.push(folder !== "" && !hasDomain ? { ...entry, domain: folder } : entry);',
+		replace: '\t\t\tentries.push(folder !== "" ? { ...entry, domain: folder } : entry);',
+		filter: "a folder is read as one import"
+	},
+	{
+		name: "an import never asks the panel to show what it wrote",
+		file: "lib/core/views.js",
+		find: '\t\t\tconst moved = typeof props.onImported === "function" && props.onImported() === true;',
+		replace: "\t\t\tconst moved = false;",
+		filter: "importMoved"
 	},
 	{
 		name: "the build guard copies literal text again",
