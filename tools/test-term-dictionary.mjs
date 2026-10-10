@@ -3827,6 +3827,65 @@ async function asyncChecks() {
 		assertEqual(String(reportText(renderPage())).includes("transferShown"), false, "with no false claim when the view was already where it should be");
 	});
 
+	test("hover: the left margin of a line is not the term that starts it", () => {
+		// Reported: with a term at the very start of a paragraph, hovering anywhere to its LEFT — out to the
+		// edge of the chat — opened the card, and a click there opened the entry. `caretRangeFromPoint` CLAMPS
+		// horizontally: a point in the margin resolves to the line's start, offset 0, which for a term that
+		// begins the line IS that term. Both gestures go through `matchAt`, so one guard covers both.
+		const { createHoverLayer } = loadCore("hover.js");
+		const text = { nodeType: 3, nodeValue: "Quorum decides.", parentElement: null, childNodes: [] };
+		const onTerm = { node: text, start: 0, end: 6, term: "Quorum", key: "quorum", id: "" };
+
+		const make = (rect) => {
+			const listeners = {};
+			// A stand-in for the conversation region: it answers `closest` for any selector, which is how the
+			// existing checks model "the pointer is inside the region". Without it the click never reaches the
+			// hit test at all — and the margin assertion would then pass for the wrong reason.
+			const zone = { classList: { add: () => {}, remove: () => {} } };
+			const target = { closest: () => zone };
+			const documentStub = {
+				getSelection: () => ({ isCollapsed: true, toString: () => "" }),
+				// The clamp, modelled: every point resolves to offset 0, and the caret's own rectangle says
+				// where the text really is.
+				caretRangeFromPoint: () => ({ startContainer: text, startOffset: 0, getBoundingClientRect: () => rect }),
+				addEventListener: (type, handler) => {
+					(listeners[type] ??= []).push(handler);
+				},
+				removeEventListener: () => {},
+				createRange: () => ({
+					setStart: () => {},
+					setEnd: () => {},
+					getBoundingClientRect: () => ({ left: 0, top: 0, right: 10, bottom: 10, width: 10, height: 10 })
+				})
+			};
+			const activated = [];
+			const layer = createHoverLayer({
+				document: documentStub,
+				segments: () => [onTerm],
+				delays: () => ({ inMs: 0, outMs: 0 }),
+				disposers: [],
+				onActivate: (segment) => activated.push(segment.term)
+			});
+			layer.attach();
+			const click = (x) => {
+				for (const handler of listeners.click ?? []) handler({ button: 0, clientX: x, clientY: 40, target });
+			};
+			return { activated, click };
+		};
+
+		// The text starts at x=300; the pointer is 280px to its left.
+		const margin = make({ left: 300, top: 32, width: 0, height: 16 });
+		margin.click(20);
+		assertEqual(margin.activated, [], "a point far to the left of the line is not on the term that starts it");
+		// And the gesture still works where the text actually is — the guard must not disable what it guards.
+		margin.click(304);
+		assertEqual(margin.activated, ["Quorum"], "while a point on the first character still opens it");
+		// A browser that cannot measure the caret is trusted rather than having every hover refused.
+		const unmeasurable = make({ left: 0, top: 0, width: 0, height: 0 });
+		unmeasurable.click(20);
+		assertEqual(unmeasurable.activated, ["Quorum"], "and an unmeasurable caret is not treated as a refusal");
+	});
+
 	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {
 		// The end-to-end half, and the one the other two checks cannot reach: the tab is clicked, the
 		// panel is rendered again, and the 撤回 button of the row it then shows is pressed through the

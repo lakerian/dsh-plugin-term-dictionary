@@ -622,6 +622,20 @@ const mutations = [
 		filter: "renaming, moving and deleting a group"
 	},
 	{
+		name: "the caret's own position is ignored, so a line's left margin counts as its first term",
+		file: "lib/core/hover.js",
+		find: "\t\tif (!caretIsAt(x, caret)) return null;",
+		replace: "",
+		filter: "the left margin of a line"
+	},
+	{
+		name: "an unmeasurable caret refuses instead of being trusted",
+		file: "lib/core/hover.js",
+		find: '\t\tif (rect === null || (rect.left === 0 && rect.top === 0 && rect.width === 0 && rect.height === 0)) return true;',
+		replace: "\t\tif (rect === null || rect.left === 0) return false;",
+		filter: "the left margin of a line"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',
