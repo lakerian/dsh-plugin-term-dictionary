@@ -1,0 +1,24 @@
+{
+  "kind": "dsh-term-dictionary-index",
+  "version": 1,
+  "updatedAt": 1791637568255,
+  "count": 1,
+  "packs": [
+    {
+      "id": "包测试",
+      "name": "包测试",
+      "description": "",
+      "author": "lakerian",
+      "license": "",
+      "domains": [
+        "软件工程",
+        "安全",
+        "网络",
+        "运维"
+      ],
+      "count": 20,
+      "sha256": "493267dd5f6e8a507f3edf206bf31cc530391a68af9f2a3c6c320777a9c64f8a",
+      "url": "https://cdn.jsdelivr.net/gh/lakerian/dsh-plugin-term-dictionary@main/packs/term-pack-%E5%8C%85%E6%B5%8B%E8%AF%95.json"
+    }
+  ]
+}

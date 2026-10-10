@@ -1,0 +1,219 @@
+{
+  "kind": "dsh-term-dictionary-pack",
+  "version": 1,
+  "id": "包测试",
+  "name": "包测试",
+  "description": "",
+  "author": "lakerian",
+  "license": "",
+  "homepage": "",
+  "build": "1.0.0",
+  "createdAt": 1791637568255,
+  "scope": {
+    "kind": "all",
+    "domains": []
+  },
+  "count": 20,
+  "entries": [
+    {
+      "term": "导入",
+      "key": "导入",
+      "definition": {
+        "zh": "导入",
+        "gloss": "把外部文件或数据读取到当前软件中并转换为可用内容的过程。在备份场景中，导入常与导出配对，用于恢复数据或批量添加词典条目，按组导入还会生成对应文件夹结构。",
+        "usage": "该词典支持按组导入，导入后每组会作为一个文件夹显示。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "重启 Host",
+      "key": "重启 host",
+      "definition": {
+        "zh": "重启宿主",
+        "gloss": "指重新启动承载插件运行的主程序（这里是桌面客户端进程）。插件的注册、inject 依赖和服务查询都在宿主启动时一次性完成，改了启动期逻辑不重启宿主就不会生效，也无法在宿主日志里看到新服务。",
+        "usage": "改完 inject 后必须重启宿主，否则仍会报 no catalogued Service named \"remote\"。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "CHANGELOG",
+      "key": "changelog",
+      "definition": {
+        "zh": "变更日志",
+        "gloss": "按版本倒序记录项目每次发布改动的文件，通常命名为 CHANGELOG.md，内容包含新增、修复与破坏性变更。它是开源发布流程的惯例文件，能让使用者判断升级到新版本是否会影响自己，npm 生态里也常被市场页面与依赖方直接查看。",
+        "usage": "这个目录里没有 LICENSE 文件、也没有 CHANGELOG，得先补齐再发 1.0.0。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "COPYRIGHT",
+      "key": "copyright",
+      "definition": {
+        "zh": "版权声明",
+        "gloss": "版权是法律赋予作品作者对其作品复制、分发、修改等行为的专有权利；在开源项目中，它由 LICENSE 文件承载，说明谁拥有该代码以及他人可以如何使用。MIT 等宽松许可证要求在声明中写明版权所有者与年份，因此占位符 <COPYRIGHT HOLDER> 必须换成真实的个人或组织名称，否则授权条款在法律上不完整。",
+        "usage": "LICENSE 里的 <COPYRIGHT HOLDER> 需要替换成真实的版权所有者署名，发布前别忘了。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "DEP0190",
+      "key": "dep0190",
+      "definition": {
+        "zh": "子进程外壳弃用",
+        "gloss": "DEP0190 是 Node.js 的一条运行时弃用警告编号：当 child_process.spawn/execFile 同时使用 shell: true 和 args 数组时，参数只与命令拼接而不做转义，存在命令注入风险，因此 Node 会提示该用法将被移除。知道它意味着你的构建或测试脚本需要改为自行转义、改用 shell 字符串，或干脆以 shell: false 直接传 argv。",
+        "usage": "把发布闸门脚本里 shell: true 加 args 数组的写法改成直接传 argv，DEP0190 警告就消失了。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "deserves",
+      "key": "deserves",
+      "definition": {
+        "zh": "值得",
+        "gloss": "英文动词，意为“值得、应得”，在技术文档、代码注释和提交信息中常用来表示某段代码或某个改动理应获得某种对待（如重构、补测试、加注释）。它体现的是作者对代码质量的主观判断和后续行动建议。",
+        "usage": "这段分支逻辑太绕了，值得单独抽成一个函数。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "ESCAPED",
+      "key": "escaped",
+      "definition": {
+        "zh": "逃逸变异体",
+        "gloss": "变异测试中被注入缺陷却未被任何测试用例「杀死」的变异体：测试仍然全绿，说明断言覆盖不足，该变异「逃逸」（ESCAPED）了。它和「被抓」（killed）相对，是衡量测试有效性、提示需要补测的关键指标。",
+        "usage": "本轮 11 个变异全部被抓，没有出现 ESCAPED。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "FIRST",
+      "key": "first",
+      "definition": {
+        "zh": "取前N项",
+        "gloss": "PowerShell 中 Select-Object 等 cmdlet 的 -First 参数，表示只从管道中截取前 N 个对象，后面多余的输出会被丢弃。它常用于限制冗长的输出，比如只看日志或错误信息的前几条。",
+        "usage": "Select-String -Path .tmp\\c.out -Pattern \"^ FAIL\" | Select-Object -First 6"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "HEAD",
+      "key": "head",
+      "definition": {
+        "zh": "当前提交指针",
+        "gloss": "HEAD 是 Git 中指向当前检出位置的引用，通常指向某个分支的最新提交，代表工作区此刻所处的版本。origin/main 与本地 HEAD 都是同一个 sha，说明本地没有未推送的提交，远端和本地代码完全一致。",
+        "usage": "git rev-parse HEAD 输出 39d6256，和远端 origin/main 指向同一个提交。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "HOLDER",
+      "key": "holder",
+      "definition": {
+        "zh": "版权持有人",
+        "gloss": "指 MIT 许可证中 `<COPYRIGHT HOLDER>` 占位符，代表版权所有者（个人或组织）。此处故意保留，使闸门因占位符而拒绝，确保署名不会被遗忘。",
+        "usage": "提交前须将 LICENSE 中的 `<COPYRIGHT HOLDER>` 替换为真实版权人名称。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "HOME",
+      "key": "home",
+      "definition": {
+        "zh": "用户主目录",
+        "gloss": "Unix/Linux 与 macOS 中当前用户的主目录，通常由环境变量 $HOME 表示（Windows 上对应 %USERPROFILE%）。它是命令行默认的落脚点，shell 里的 ~ 就展开成它，脚本和工具常把仓库、缓存、配置放在这里，所以路径写错或 HOME 指向不对时，工具会找不到文件。",
+        "usage": "把词条包仓库克隆到 $HOME 下，再从那里执行 node tools/make-pack-index.mjs。"
+      },
+      "domain": "运维"
+    },
+    {
+      "term": "Host",
+      "key": "host",
+      "definition": {
+        "zh": "主机",
+        "gloss": "指网络中可被访问的服务器或域名，这里特指需要测试连通性的各个 GitHub 域名（如 github.com、api.github.com 等）。网络排查通常按主机逐一确认是否可达。",
+        "usage": "先用 curl 测一下这些主机的连通性，再决定哪些资源可以放心引用。"
+      },
+      "domain": "网络"
+    },
+    {
+      "term": "LASTEXITCODE",
+      "key": "lastexitcode",
+      "definition": {
+        "zh": "最后退出码",
+        "gloss": "PowerShell 的自动变量，保存最近一次运行的外部原生命令（如 node、git、exe）的退出码，0 通常表示成功，非 0 表示失败。脚本常借此判断上一条命令是否执行成功。",
+        "usage": "node --check styles.js; \"syntax=$LASTEXITCODE\" 输出 syntax=0 说明语法检查通过。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "LICENSE",
+      "key": "license",
+      "definition": {
+        "zh": "开源许可证",
+        "gloss": "放在项目根目录、声明代码使用条款的法律文件（如 MIT、Apache-2.0），决定别人能怎么用、改、再分发你的代码。npm 发布和开源分发一般要求必须有它，否则使用者无法判断授权范围。",
+        "usage": "这个目录里没有 LICENSE 文件，也没有 CHANGELOG，发布前得先补一份。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "npm",
+      "key": "npm",
+      "definition": {
+        "zh": "节点包管理器",
+        "gloss": "npm 是 Node.js 生态的默认包管理器，负责安装、升级、发布和管理 JavaScript 依赖包，并提供 package.json、npm scripts 等约定。文中 tools/make-pack-index.mjs 这类脚本和包文件都跑在 Node 环境里，依赖关系、构建和发布流程通常由 npm 驱动。",
+        "usage": "先 npm install 装好依赖，再执行 node tools/make-pack-index.mjs 生成索引。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "OWNER",
+      "key": "owner",
+      "definition": {
+        "zh": "仓库所有者",
+        "gloss": "在 GitHub 仓库路径中，OWNER 指拥有该仓库的用户名或组织名，是构成仓库地址和 jsDelivr 等 CDN 链接的关键字段。",
+        "usage": "例如 cdn.jsdelivr.net/gh/<owner>/<repo>@<ref>/<file> 里的 <owner> 应替换为你的 GitHub 用户名或组织名。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "SHA256",
+      "key": "sha256",
+      "definition": {
+        "zh": "安全散列摘要",
+        "gloss": "SHA256 是一种密码学哈希函数，把任意长度的输入压缩成 256 位（64 个十六进制字符）的定长摘要；输入只要改动一个字节，摘要就完全不同。在构建与发布流程中，它用来校验产物是否被篡改或损坏、唯一标识一次构建的版本。",
+        "usage": "发布前先核对产物的 SHA256，确认 581519 字节的文件与 --check 记录一致后再切 Host。"
+      },
+      "domain": "安全"
+    },
+    {
+      "term": "STALE",
+      "key": "stale",
+      "definition": {
+        "zh": "陈旧状态",
+        "gloss": "指缓存、产物或校验结果已经过期，不再对应当前最新的源数据或最新版本（如最新 rev）。它重要，是因为继续使用陈旧内容会让校验或测试得出错误的“全绿”结论。",
+        "usage": "产物对应的是上一个 rev，所以 --check 被标记为 STALE，需要重新生成。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "STOP",
+      "key": "stop",
+      "definition": {
+        "zh": "首站",
+        "gloss": "指流程中的第一个停靠点或入口节点，强调必须从此处开始，再进入后续步骤。在此上下文中，它把查询工具标记为整个知识检索流程的起点。",
+        "usage": "hindsight_search_knowledge_pages(query) 是 FIRST STOP，也是进入下面所有内容的方式。"
+      },
+      "domain": "软件工程"
+    },
+    {
+      "term": "topic",
+      "key": "topic",
+      "definition": {
+        "zh": "仓库主题",
+        "gloss": "GitHub 仓库上的公开分类标签，写在 About 区域的 Topics 里，用于让仓库可被搜索和归类，本身只是元数据，不影响代码或权限。",
+        "usage": "在建仓库时给它打上 topic：glossary、cli、chinese，别人搜索时更容易命中。"
+      },
+      "domain": "软件工程"
+    }
+  ]
+}
