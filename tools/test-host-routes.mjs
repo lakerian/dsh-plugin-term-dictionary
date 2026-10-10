@@ -131,6 +131,10 @@ async function startHost(options = {}) {
 	};
 
 	const module = await import(pathToFileURL(join(pluginDir, "lib", "index.js")).href);
+	// The fetch seam, so the network side of the packs runs without a network: every URL still has to
+	// pass the https rule on its own merits (that check is on the STRING), while the transport itself
+	// is whatever a check hands in.
+	module.__testing({ fetch: options.fetch });
 	module.apply(context, { dataDir: options.dataDir, ...(options.config ?? {}) });
 
 	return {
@@ -539,6 +543,211 @@ async function main() {
 			assert(String(answer.body?.error ?? "").includes("broken"), "and its own message is passed on rather than swallowed");
 		} finally {
 			await broken.close();
+		}
+	});
+
+	//#endregion
+
+	//#region packs: publishing, share codes, and the network side
+
+	/** A transport that answers from a table of URL to body, and counts what it was asked for. */
+	const stubFetch = (table) => {
+		const calls = [];
+		const impl = async (url) => {
+			calls.push(url);
+			const body = table[url];
+			if (body === undefined) throw new Error(`nothing at ${url}`);
+			return { ok: true, status: 200, text: async () => body };
+		};
+		impl.calls = calls;
+		return impl;
+	};
+
+	/** The entry the pack must NOT carry anything from. */
+	const SOURCE_ENTRY = {
+		term: "Quorum",
+		key: "quorum",
+		definition: { zh: "多数派确认", gloss: "写入需要多少个副本确认。", usage: "reached quorum", notes: "私人笔记" },
+		domain: "分布式",
+		aliases: ["quorum"],
+		context: "私人上下文",
+		feedback: { kind: "wrong-gloss", note: "太笼统" },
+		untrusted: true,
+		pinned: true,
+		seen: 9
+	};
+
+	test("pack: publishing carries content and nothing about this machine", async () => {
+		const host = await startHost({ dataDir: dir });
+		try {
+			const seeded = await post(`${host.url}/dsh-term-dictionary/entries`, { action: "replace", state: { entries: [SOURCE_ENTRY, { term: "Sidecar", key: "sidecar", definition: { zh: "边车", gloss: "把辅助功能放进同一个 Pod。" }, domain: "架构" }, { term: "Gone", key: "gone", definition: { gloss: "删掉的" } }] } });
+			assertEqual(seeded.status, 200, "the dictionary is seeded through the ordinary write path");
+			// A tombstone is the record of a decision THIS machine made, so publishing one would be
+			// publishing somebody's deletion.
+			await post(`${host.url}/dsh-term-dictionary/entries`, { action: "remove", term: "Gone" });
+
+			const built = await post(`${host.url}/dsh-term-dictionary/pack`, { action: "build", id: "lakerian/backend", name: "后端黑话", author: "lakerian", license: "CC-BY-4.0", code: true });
+			assertEqual(built.status, 200, "building a pack answers");
+			assertEqual(built.body.ok, true, "and reports success");
+			assertEqual(built.body.summary.count, 2, "with both live entries and neither the tombstone nor a duplicate");
+			assert(/^[0-9a-f]{64}$/.test(built.body.sha256), `the digest is a sha256, saw ${built.body.sha256}`);
+			assertEqual(typeof built.body.pack.build, "string", "and the pack names the build that made it");
+
+			// The allowlist, asserted as the exact key set rather than as "these fields are absent": a
+			// field added later must be a deliberate decision, not something a test forgot to forbid.
+			const record = built.body.pack.entries.find((entry) => entry.key === "quorum");
+			assertEqual(Object.keys(record).sort(), ["aliases", "definition", "domain", "key", "term"], "a record carries content and nothing else");
+			assertEqual(Object.keys(record.definition).sort(), ["gloss", "usage", "zh"], "not even the private notes");
+			assertEqual(JSON.stringify(built.body.pack).includes("私人上下文"), false, "the conversation never leaves in a pack");
+			assertEqual(JSON.stringify(built.body.pack.entries).includes("wrong-gloss"), false, "and neither does the author's verdict on an explanation");
+			assertEqual(JSON.stringify(built.body.pack.entries).includes("gone"), false, "and a term the user deleted stays deleted");
+
+			const decoded = await post(`${host.url}/dsh-term-dictionary/pack`, { action: "decode", code: built.body.code });
+			assertEqual(decoded.body.ok, true, "the share code decodes");
+			assertEqual(decoded.body.summary.count, 2, "to the same number of entries");
+			assertEqual(decoded.body.pack.entries.map((entry) => entry.key), built.body.pack.entries.map((entry) => entry.key), "and the same ones");
+			assertEqual(decoded.body.pack.name, "后端黑话", "with the pack's own name");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("pack: a scope publishes one category, and an empty scope is not an empty dictionary", async () => {
+		const host = await startHost({ dataDir: dir });
+		try {
+			await post(`${host.url}/dsh-term-dictionary/entries`, { action: "replace", state: { entries: [SOURCE_ENTRY, { term: "Sidecar", key: "sidecar", definition: { zh: "边车", gloss: "g" }, domain: "架构" }] } });
+			const scoped = await post(`${host.url}/dsh-term-dictionary/pack`, { action: "build", scope: "domains", domains: ["架构"] });
+			assertEqual([scoped.body.ok, scoped.body.summary.count], [true, 1], "only the chosen category travels");
+			assertEqual(scoped.body.pack.entries[0].key, "sidecar", "and it is the right entry");
+			assertEqual(scoped.body.pack.scope, { kind: "domains", domains: ["架构"] }, "the pack says what it is a slice of");
+
+			// Two different emptinesses, and the page says them differently: "your categories are empty"
+			// is a fixable choice, "your dictionary is empty" is a different situation entirely.
+			const nothing = await post(`${host.url}/dsh-term-dictionary/pack`, { action: "build", scope: "domains", domains: ["没有这个分类"] });
+			assertEqual([nothing.status, nothing.body.error], [400, "empty-scope"], "an empty selection is refused as a scope");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("pack: a code that is not one is refused by name", async () => {
+		const host = await startHost({ dataDir: dir });
+		try {
+			assertEqual((await post(`${host.url}/dsh-term-dictionary/pack`, { action: "decode", code: "hello" })).body.error, "not-a-code", "something that is not a code says so");
+			assertEqual((await post(`${host.url}/dsh-term-dictionary/pack`, { action: "decode", code: "dshpack1:" })).body.error, "empty-code", "an empty code says that");
+			assertEqual((await post(`${host.url}/dsh-term-dictionary/pack`, { action: "decode", code: "dshpack1:zzzz" })).body.error, "corrupt", "a mangled paste says corrupt rather than crashing the route");
+			assertEqual((await post(`${host.url}/dsh-term-dictionary/pack`, { action: "publish" })).status, 400, "an unknown action is refused");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("source: only https is ever fetched, and the refusal happens before the transport", async () => {
+		const transport = stubFetch({});
+		const host = await startHost({ dataDir: dir, fetch: transport });
+		try {
+			for (const url of ["http://example.com/i.json", "file:///c:/i.json", "https://user:pw@example.com/i.json", "not a url"]) {
+				const answer = await get(`${host.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent(url)}`);
+				assertEqual(answer.status, 400, `${url} must be refused`);
+			}
+			assertEqual(transport.calls.length, 0, "and nothing was fetched while refusing them");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("source: an index is fetched once, cached, and partly unusable rows are dropped", async () => {
+		const url = "https://example.com/term-packs/index.json";
+		const good = { id: "lakerian/backend", name: "后端黑话", description: "一份后端黑话", author: "lakerian", count: 2, domains: ["分布式"], sha256: "a".repeat(64), url: `${url}#pack` };
+		const body = JSON.stringify({ kind: "dsh-term-dictionary-index", version: 1, updatedAt: 5, packs: [good, { id: "bad", name: "Bad", url: "http://insecure/x.json" }, "junk", { name: "no url" }] });
+		const transport = stubFetch({ [url]: body });
+		const host = await startHost({ dataDir: dir, fetch: transport });
+		try {
+			const first = await get(`${host.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent(url)}`);
+			assertEqual([first.body.ok, first.body.cached, first.body.dropped], [true, false, 3], "the usable pack is listed and the three unusable rows are counted");
+			assertEqual(first.body.index.packs.length, 1, "one pack survives");
+			assertEqual(first.body.index.packs[0].id, "lakerian/backend", "and it is the right one");
+
+			const second = await get(`${host.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent(url)}`);
+			assertEqual([second.body.ok, second.body.cached], [true, true], "the second look is served from the cache");
+			assertEqual(transport.calls.length, 1, "so the source was asked exactly once");
+			assertEqual(second.body.index.packs[0].name, "后端黑话", "with the same content");
+
+			const refreshed = await get(`${host.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent(url)}&refresh=1`);
+			assertEqual([refreshed.body.cached, transport.calls.length], [false, 2], "and asking to refresh really asks again");
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("source: an unreachable source falls back to what it last said, marked stale", async () => {
+		// Its own URL, because the cache lives in the data directory every check shares: reusing the
+		// other check's URL made this one read the other check's content, which is what it reported.
+		const url = "https://example.com/stale/index.json";
+		const body = JSON.stringify({ kind: "dsh-term-dictionary-index", version: 1, packs: [{ id: "a/b", name: "B", url: `${url}#pack` }] });
+		// One host seeds the cache, a second host (same data directory) cannot reach the source at all.
+		const seeding = await startHost({ dataDir: dir, fetch: stubFetch({ [url]: body }) });
+		try {
+			await get(`${seeding.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent(url)}`);
+		} finally {
+			await seeding.close();
+		}
+		const offline = stubFetch({});
+		const host = await startHost({ dataDir: dir, fetch: offline });
+		try {
+			const answer = await get(`${host.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent(url)}&refresh=1`);
+			assertEqual([answer.body.ok, answer.body.stale, answer.body.error], [true, true, "unreachable"], "yesterday's list comes back, labelled");
+			assertEqual(answer.body.index.packs[0].name, "B", "and it is the cached content");
+			// A source that was never reachable is a plain failure: there is nothing to fall back to.
+			const unknown = await get(`${host.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent("https://example.com/other.json")}`);
+			assertEqual([unknown.body.ok, unknown.body.error], [false, "unreachable"], "an unknown source fails as unreachable");
+			const broken = await startHost({ dataDir: dir, fetch: stubFetch({ [url]: "not json at all" }) });
+			try {
+				const answer2 = await get(`${broken.url}/dsh-term-dictionary/source/index?url=${encodeURIComponent(url)}&refresh=1`);
+				assertEqual([answer2.body.ok, answer2.body.error], [false, "not-json"], "a source serving something else says not-json");
+			} finally {
+				await broken.close();
+			}
+		} finally {
+			await host.close();
+		}
+	});
+
+	test("source: a pack is verified against the checksum the index promised", async () => {
+		const host = await startHost({ dataDir: dir });
+		let code = "";
+		try {
+			await post(`${host.url}/dsh-term-dictionary/entries`, { action: "replace", state: { entries: [SOURCE_ENTRY] } });
+			const built = await post(`${host.url}/dsh-term-dictionary/pack`, { action: "build", id: "lakerian/backend", name: "后端黑话" });
+			code = built.body.sha256;
+		} finally {
+			await host.close();
+		}
+		// The pack file a source would serve, published as the exact bytes its digest covers.
+		const packText = JSON.stringify({ kind: "dsh-term-dictionary-pack", version: 1, id: "lakerian/backend", name: "后端黑话", count: 1, entries: [{ term: "Quorum", key: "quorum", definition: { zh: "多数派确认", gloss: "写入需要多少个副本确认。" } }] });
+		const url = "https://example.com/term-packs/backend.json";
+		const transport = stubFetch({ [url]: packText });
+		const hosted = await startHost({ dataDir: dir, fetch: transport });
+		try {
+			const { createHash } = await import("node:crypto");
+			const digest = createHash("sha256").update(packText, "utf8").digest("hex");
+			void code;
+
+			const wrong = await get(`${hosted.url}/dsh-term-dictionary/source/pack?url=${encodeURIComponent(url)}&sha256=${"b".repeat(64)}`);
+			assertEqual([wrong.body.ok, wrong.body.error], [false, "checksum-mismatch"], "a file that does not match the promise is refused");
+			assertEqual(wrong.body.pack, undefined, "and its content is not handed over anyway");
+			assertEqual(wrong.body.sha256, digest, "though the digest it actually has is reported, so the mismatch is diagnosable");
+
+			const right = await get(`${hosted.url}/dsh-term-dictionary/source/pack?url=${encodeURIComponent(url)}&sha256=${digest}`);
+			assertEqual([right.body.ok, right.body.cached], [true, false], "the matching file is accepted");
+			assertEqual(right.body.summary.count, 1, "and summarised for the list");
+			assertEqual(right.body.pack.entries[0].term, "Quorum", "with its entries");
+
+			const again = await get(`${hosted.url}/dsh-term-dictionary/source/pack?url=${encodeURIComponent(url)}&sha256=${digest}`);
+			assertEqual([again.body.ok, again.body.cached], [true, true], "and the second fetch is served from the cache");
+			assertEqual(transport.calls.length, 2, "with the source asked once for the refusals and the acceptances together");
+		} finally {
+			await hosted.close();
 		}
 	});
 

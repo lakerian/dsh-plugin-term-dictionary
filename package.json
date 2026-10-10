@@ -30,6 +30,7 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
+    "lib/pack-code.js",
     "lib/core/*.js",
     "lib/core/package.json",
     "lib/ROADMAP-lexicon.md",

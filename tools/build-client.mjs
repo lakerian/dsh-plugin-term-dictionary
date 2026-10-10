@@ -40,6 +40,7 @@ const MODULES = [
 	"store.js",
 	"settings.js",
 	"transfer.js",
+	"pack.js",
 	"api.js",
 	"interact.js",
 	"highlight.js",

@@ -4,6 +4,18 @@
 
 ## 未发布
 
+### 词条包与分享码（界面未接）
+
+- `lib/core/pack.js`：包形状、按分类切片、允许字段的精确白名单（`context`/`notes`/`feedback`/
+  `untrusted`/`pinned`/`source`/历史计数/墓碑都进不去）、索引形状与 `refuseUrl`（只允许 https）。
+- `lib/pack-code.js`（宿主）：`dshpack1:` + base64url(raw-deflate) 分享码，解码时剥空白、
+  区分 `not-a-code`/`corrupt`/`too-large`，**解压上限 4 MiB**（防解压炸弹）。
+- 宿主路由：`POST /pack`（build / decode）、`GET /source/index`、`GET /source/pack`。
+  索引 1 小时、包 24 小时的磁盘缓存；源不可达而缓存还在 → 返回上次内容并标 `stale`；
+  索引里不可用的行丢掉并计数；包的 `sha256` 与索引承诺不符则拒绝。
+- 打包修复：`files` 白名单漏了 `lib/pack-code.js`（装出来的包 import 会失败）——
+  这是发布闸门"装进干净目录再 import"这一步第一次抓到真问题。
+
 ### 复制词条
 
 - 每行一个**复制**图标、编辑器里一个**复制词条**按钮：一次点击把词条写成可读文本

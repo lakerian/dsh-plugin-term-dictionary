@@ -311,6 +311,53 @@ const mutations = [
 		filter: "one shared answer"
 	},
 	{
+		name: "a pack carries the author's own verdicts and remarks",
+		file: "lib/core/pack.js",
+		find: "\tif (Array.isArray(entry?.aliases) && entry.aliases.length > 0) record.aliases = [...entry.aliases];\n\treturn record;",
+		replace: "\tif (Array.isArray(entry?.aliases) && entry.aliases.length > 0) record.aliases = [...entry.aliases];\n\tif (entry?.feedback !== undefined) record.feedback = entry.feedback;\n\tif (entry?.untrusted !== undefined) record.untrusted = entry.untrusted;\n\tif (entry?.pinned !== undefined) record.pinned = entry.pinned;\n\treturn record;",
+		filter: "pack:",
+		suite: "host"
+	},
+	{
+		name: "a pack publishes a term the user deleted",
+		file: "lib/core/pack.js",
+		find: "const all = (Array.isArray(entries) ? entries : []).filter((entry) => (entry?.deletedAt ?? 0) === 0);",
+		replace: "const all = Array.isArray(entries) ? entries : [];",
+		filter: "pack:"
+	},
+	{
+		name: "an empty category selection silently publishes the whole dictionary",
+		file: "lib/core/pack.js",
+		find: '\tif (picked.length === 0) return { ok: false, error: scope === "all" ? "empty" : "empty-scope" };',
+		replace: "\tif (picked.length === 0 && scope === \"all\") return { ok: false, error: \"empty\" };",
+		filter: "pack:",
+		suite: "host"
+	},
+	{
+		name: "the source rule stops insisting on https",
+		file: "lib/core/pack.js",
+		find: '\tif (url.protocol !== "https:") return "not-https";',
+		replace: "\tif (false) return \"not-https\";",
+		filter: "source:",
+		suite: "host"
+	},
+	{
+		name: "a fetched pack is accepted without checking the promised digest",
+		file: "lib/index.js",
+		find: '\t\tif (promised !== "" && promised !== digest) {',
+		replace: "\t\tif (false) {",
+		filter: "source:",
+		suite: "host"
+	},
+	{
+		name: "an unreachable source is not served from its cache",
+		file: "lib/index.js",
+		find: "\t\t\tif (entry !== undefined) {\n\t\t\t\treturn sendJson(res, 200, { ok: true, index: entry.index, fetchedAt: entry.fetchedAt, cached: true, stale: true, error: fetched.error });\n\t\t\t}",
+		replace: "\t\t\tif (false) {\n\t\t\t\treturn sendJson(res, 200, { ok: true, index: entry.index, fetchedAt: entry.fetchedAt, cached: true, stale: true, error: fetched.error });\n\t\t\t}",
+		filter: "source:",
+		suite: "host"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',

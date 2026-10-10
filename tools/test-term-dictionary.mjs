@@ -1535,6 +1535,50 @@ test("selection: one shared answer, aware of carets, whitespace and which host w
 	assertEqual(selectionInside(null, { getSelection: () => ({ isCollapsed: false, toString: () => "x" }) }), false, "no element is no selection");
 });
 
+test("pack: a pack is content, sliced by category, and never a tombstone", () => {
+	// The module's own contract, asserted here rather than only through the host route: the route
+	// builds from `serializeState`, which has already dropped tombstones, so a filter that stopped
+	// working inside `buildPack` would be invisible from there. The client half can call this module
+	// too (it validates a fetched pack with the same `parsePack`), which is the other reason the rule
+	// belongs to the module rather than to its caller.
+	const pack = loadCore("pack.js");
+	const entries = [
+		{ term: "Quorum", key: "quorum", definition: { zh: "多数派确认", gloss: "g", usage: "u", notes: "私人笔记" }, domain: "分布式", aliases: ["q"], context: "私人上下文", feedback: { kind: "wrong-gloss", note: "x" }, untrusted: true, pinned: true, seen: 9, deletedAt: 0 },
+		{ term: "Sidecar", key: "sidecar", definition: { gloss: "s" }, domain: "架构", deletedAt: 0 },
+		{ term: "Gone", key: "gone", definition: { gloss: "x" }, deletedAt: 5 }
+	];
+	const built = pack.buildPack(entries, { id: "a/b", name: "N", author: "me", scope: "all", now: 7 });
+	assertEqual(built.ok, true, "a pack builds");
+	assertEqual(built.pack.count, 2, "a deleted entry is not published");
+	assertEqual(built.pack.entries.map((entry) => entry.key), ["quorum", "sidecar"], "and the live ones are sorted, so the same dictionary always makes the same bytes");
+	assertEqual(Object.keys(built.pack.entries[0]).sort(), ["aliases", "definition", "domain", "key", "term"], "a record is content and nothing else");
+	assertEqual(Object.keys(built.pack.entries[0].definition).sort(), ["gloss", "usage", "zh"], "not the author's private notes");
+	assertEqual(JSON.stringify(built.pack).includes("私人上下文"), false, "and never the conversation a term appeared in");
+
+	const scoped = pack.buildPack(entries, { scope: "domains", domains: ["架构"], now: 7 });
+	assertEqual(scoped.pack.entries.map((entry) => entry.key), ["sidecar"], "a scoped pack takes only its category");
+	assertEqual(scoped.pack.scope, { kind: "domains", domains: ["架构"] }, "and says what it is a slice of");
+	assertEqual(pack.buildPack([], {}).error, "empty", "an empty dictionary is refused");
+	assertEqual(pack.buildPack(entries, { scope: "domains", domains: ["nope"] }).error, "empty-scope", "and an empty selection is refused as a selection");
+
+	assertEqual(pack.parsePack({ kind: "x", version: 1, entries: [{ term: "a" }] }).error, "not-a-pack", "a file that is not a pack says so");
+	assertEqual(pack.parsePack({ kind: "dsh-term-dictionary-pack", version: 99, entries: [{ term: "a" }] }).error, "unsupported-version", "a newer version is refused by name");
+	assertEqual(pack.parsePack({ kind: "dsh-term-dictionary-pack", version: 1, entries: [] }).error, "no-usable-entries", "and a pack with nothing usable in it is refused");
+	const round = pack.parsePack(JSON.parse(pack.packBytes(built.pack)));
+	assertEqual([round.ok, round.pack.count, round.pack.name], [true, 2, "N"], "while a real pack round-trips through the same bytes a file would carry");
+	assertEqual(pack.summarizePack(round.pack).domains.map((entry) => entry.domain).sort(), ["分布式", "架构"], "and summarises its categories");
+
+	// The index the reader browses, and the one rule that makes a source safe to follow.
+	const index = pack.buildIndex([{ id: "a/b", name: "B", url: "https://example.com/p.json", count: 2 }, { id: "bad", name: "Bad", url: "http://insecure/p.json" }], { now: 7 });
+	assertEqual([index.kind, index.count, index.packs.length], ["dsh-term-dictionary-index", 1, 1], "an index keeps only the sources it could actually fetch");
+	const parsedIndex = pack.parseIndex({ ...index, packs: [...index.packs, { id: "nourl" }, "junk"] });
+	assertEqual([parsedIndex.ok, parsedIndex.dropped], [true, 2], "and reading one drops the rows it cannot use instead of failing the file");
+	assertEqual(pack.refuseUrl("https://example.com/p.json"), null, "https may be fetched");
+	for (const [url, reason] of [["http://example.com/p.json", "not-https"], ["file:///c:/p.json", "not-https"], ["https://u:p@example.com/p.json", "credentials-in-url"], ["nonsense", "bad-url"], ["", "no-url"]]) {
+		assertEqual(pack.refuseUrl(url), reason, `${url || "(empty)"} is refused as ${reason}`);
+	}
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its

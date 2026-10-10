@@ -200,7 +200,11 @@ if (packed !== null && existsSync(packed)) {
 				stdio: ['ignore', 'pipe', 'pipe']
 			});
 		} catch (error) {
-			probeError = `${error.message}`.split('\n')[0];
+			// The child's own first line of stderr, not just "Command failed": the reason a check like
+			// this exists is a module the `files` allowlist forgot, and the message that names it
+			// (`Cannot find module './pack-code.js'`) is the whole diagnosis.
+			const stderr = String(error?.stderr ?? '').split('\n').map((line) => line.trim()).filter((line) => line !== '' && !line.startsWith('at '));
+			probeError = stderr[0] ?? `${error.message}`.split('\n')[0];
 		}
 		const shape = probeError === null ? JSON.parse(probe.trim()) : null;
 		expect('the installed host half imports and exports apply/inject', shape?.apply === 'function' && shape?.inject === true, probeError ?? JSON.stringify(shape));
