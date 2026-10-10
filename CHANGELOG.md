@@ -6,6 +6,14 @@
 
 ### 词条包与分享码
 
+- `tools/make-pack-index.mjs`：把 `packs/` 里的包扫成 `packs/index.json`（各自的 sha256、条数、分类、
+  可取的 https 地址），`--check` 不写文件、不一致即非零退出。索引是**确定性**的（`updatedAt` 取目录里
+  最新那个包的时间），所以 `--check` 才可能通过——第一版不是，这个 bug 被端到端用例逼出来。
+- 宿主：缓存里的包**对不上索引承诺的摘要**时会**重新取一次**再判定。摘要是权威、缓存不是；
+  否则重发包之后读者会在大约一天里看到 `checksum-mismatch`，看起来就像包坏了。
+- `packs/README.md`：发一个源的完整步骤与两条硬规则。
+- 端到端用例：真跑生成器 → 把生成出来的索引与包喂给真实路由 → 摘要必须通过；篡改一个字节必须被拒；
+  同 URL 新字节新摘要必须通过（证明会重取而不是拿缓存判死）。
 - `lib/core/pack.js`：包形状、按分类切片、允许字段的精确白名单（`context`/`notes`/`feedback`/
   `untrusted`/`pinned`/`source`/历史计数/墓碑都进不去）、索引形状与 `refuseUrl`（只允许 https）。
 - `lib/pack-code.js`（宿主）：`dshpack1:` + base64url(raw-deflate) 分享码，解码时剥空白、

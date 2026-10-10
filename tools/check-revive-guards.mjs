@@ -397,6 +397,22 @@ const mutations = [
 		filter: "source fetch"
 	},
 	{
+		name: "a stale cached pack is trusted over the digest that was promised",
+		file: "lib/index.js",
+		find: '\t\tif (cached && promised !== "" && promised !== digest) {',
+		replace: "\t\tif (false) {",
+		filter: "verified against the checksum",
+		suite: "host"
+	},
+	{
+		name: "the generated index changes on every run, so staleness can never be detected",
+		file: "tools/make-pack-index.mjs",
+		find: "const index = pack.buildIndex(listed, { now: newest });",
+		replace: "const index = pack.buildIndex(listed, { now: Date.now() });",
+		filter: "index the generator writes",
+		suite: "host"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',
