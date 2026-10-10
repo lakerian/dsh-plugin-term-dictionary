@@ -1920,6 +1920,44 @@ test("import: a brand-new term arrives, and the report says so", () => {
 	assertEqual(findEntry(state, "Quorum").definition.gloss, "已有", "while the entry that was already here kept its own text");
 });
 
+test("dictionary: restoring a deleted term withdraws the tombstone instead of outvoting it", () => {
+	// Reported: "a term that was collected and then deleted cannot be restored". Restoring was expressed as
+	// "write an edit and hope the merge weighs it right" — an inferred comparison between a crafted
+	// timestamp and the deletion's. It is now a named act with its own evidence, and the document it
+	// produces no longer claims the term is deleted at all, which is what makes a later merge unable to put
+	// the deletion back.
+	const { emptyState, editEntry, removeEntry, restoreEntry, findEntry, listEntries, listDeleted, mergeState } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	state = editEntry(state, "Quorum", { definition: { gloss: "旧解释" } }, { now: 10 }).state;
+	const id = findEntry(state, "Quorum").id;
+	state = removeEntry(state, id, { now: 20 }).state;
+	assertEqual([listEntries(state, "", "all").length, listDeleted(state).length], [0, 1], "the term starts out deleted");
+	assertEqual(state.deletedKeys, ["quorum"], "with the deletion announced by key");
+
+	const restored = restoreEntry(state, "Quorum", { definition: { gloss: "来自文件" } }, { now: 30 });
+	assertEqual(restored.restored, true, "the restoration reports that it happened");
+	assertEqual(listEntries(restored.state, "", "all").map((entry) => entry.term), ["Quorum"], "the term is live");
+	assertEqual(listDeleted(restored.state).length, 0, "and off the deleted list");
+	assertEqual(restored.state.deletedKeys, [], "the deletion is WITHDRAWN from the document, not merely outvoted");
+	assertEqual((restored.state.backing ?? []).length, 0, "and the tombstone record is gone with it");
+	assertEqual(restored.entry.definition.gloss, "来自文件", "the imported text is what it comes back with");
+	assertEqual(restored.entry.restoredAt, 30, "stamped as a restoration, which is the evidence a merge reads");
+	assertEqual(restored.entry.source, "user", "and attributed to the user, because they asked for it");
+
+	// The merge that used to undo it: a document still holding the tombstone, in both directions.
+	assertEqual(listEntries(mergeState(restored.state, state, { now: 40 }), "", "all").map((entry) => entry.term), ["Quorum"], "a merge against the copy that still has the tombstone keeps it");
+	assertEqual(listEntries(mergeState(state, restored.state, { now: 40 }), "", "all").map((entry) => entry.term), ["Quorum"], "in either order");
+	assertEqual(listDeleted(mergeState(state, restored.state, { now: 40 })).length, 0, "with nothing left on the deleted list");
+
+	// Restoring something already live is not a restoration, and must not claim to be one.
+	const again = restoreEntry(restored.state, "Quorum", {}, { now: 50 });
+	assertEqual(again.restored, false, "restoring a live term does nothing and says so");
+	assertEqual(again.entry.definition.gloss, "来自文件", "leaving its text alone");
+	// And a term nobody ever had is simply created, which is what an import of a new term needs.
+	const created = restoreEntry(state, "Freshterm", { definition: { gloss: "新的" } }, { now: 60 });
+	assertEqual([created.restored, findEntry(created.state, "Freshterm") !== undefined], [false, true], "a term that was never here is created");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its

@@ -838,6 +838,58 @@ async function main() {
 
 	//#region an import, through the host
 
+	test("import: a revived entry survives the WHOLE-DOCUMENT push the page actually sends", async () => {
+		// The check below sends `action: "update"`, one record — but the page does not do that: it persists
+		// its document and pushes `{ action: "replace", state }` (api.js), so the host merges a whole
+		// document against one that still holds the tombstone. Reported: "a term that was collected and then
+		// deleted cannot be restored" — while a term that was never seen imports fine.
+		const host = await startHost({ dataDir: dir });
+		try {
+			await post(`${host.url}/dsh-term-dictionary/entries`, { action: "record", term: "Zigzag", glossary: { gloss: "旧解释" } });
+			await post(`${host.url}/dsh-term-dictionary/entries`, { action: "remove", term: "Zigzag" });
+			const removed = await get(`${host.url}/dsh-term-dictionary/state`);
+			assertEqual(removed.body.entries.some((entry) => entry.term === "Zigzag"), false, "the term starts out deleted");
+
+			// The document the PAGE holds after its import write: the record is live, written by the user,
+			// stamped past the deletion. This is exactly what `editEntry` produces and what `commit` pushes.
+			const pageDoc = {
+				schemaVersion: removed.body.schemaVersion,
+				updatedAt: (removed.body.updatedAt ?? 0) + 1000,
+				entries: [
+					{
+						term: "Zigzag",
+						key: "zigzag",
+						definition: { zh: "", gloss: "来自文件", usage: "", notes: "" },
+						aliases: [],
+						domain: "",
+						source: "user",
+						confidence: 1,
+						createdAt: 1,
+						updatedAt: (removed.body.updatedAt ?? 0) + 1000,
+						seen: 1,
+						lastSeenAt: (removed.body.updatedAt ?? 0) + 1000,
+						context: "",
+						pinned: false,
+						deletedAt: 0
+					}
+				],
+				deletedKeys: []
+			};
+			const pushed = await post(`${host.url}/dsh-term-dictionary/entries`, { action: "replace", state: pageDoc });
+			// The replace route answers with the merged STATE (not an ack), which is what the page adopts.
+			assert(
+				Array.isArray(pushed.body.entries) && pushed.body.entries.some((entry) => entry.term === "Zigzag"),
+				`the host's own answer to the push has the term live, got ${JSON.stringify(pushed.body).slice(0, 200)}`
+			);
+			const after = await get(`${host.url}/dsh-term-dictionary/state`);
+			const revived = after.body.entries.find((entry) => entry.term === "Zigzag");
+			assert(revived !== undefined, "and it is still live when the state is read again");
+			assertEqual(revived?.definition.gloss, "来自文件", "carrying the imported text");
+		} finally {
+			await host.close();
+		}
+	});
+
 	test("import: an entry revived by an import survives the host round trip", async () => {
 		// The path no check covered until a user reported "the imported entries do not appear": the write
 		// the page performs is an ordinary `update`, so the question is whether the HOST keeps it — the

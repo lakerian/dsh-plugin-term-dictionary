@@ -510,6 +510,26 @@ const mutations = [
 		replace: '\tconst raw2 = raw;\n\tif (raw2.kind !== INDEX_KIND) return { ok: false, error: "not-an-index" };',
 		filter: "TEXT that production"
 	},
+	// RETIRED M(retired) — "a restoration leaves the tombstone in the document for a merge to find again".
+	// It anchored on a hand-made `backing` filter in `restoreEntry`, and it stopped biting because that
+	// filter was REDUNDANT: re-sealing the rewritten records derives `backing`/`deletedKeys` afresh, so the
+	// hand-made filter could not change the outcome. The claim it tested is still guarded — by "a restoration
+	// is not recorded as evidence", which removes the `restoredAt` the merge reads, and by the suite's
+	// assertion that `deletedKeys` and `backing` come back empty from a restoration.
+	{
+		name: "a restoration is not recorded as evidence, so a merge has only a clock to read",
+		file: "lib/core/dictionary.js",
+		find: '\t\tentry.id === found.id || entry.key === key ? { ...entry, deletedAt: 0, restoredAt: stamp, source: "user", updatedAt: stamp, lastSeenAt: stamp } : entry',
+		replace: '\t\tentry.id === found.id || entry.key === key ? { ...entry, deletedAt: 0, source: "user", updatedAt: stamp, lastSeenAt: stamp } : entry',
+		filter: "withdraws the tombstone"
+	},
+	{
+		name: "a restore of an already-live term claims it restored something",
+		file: "lib/core/dictionary.js",
+		find: "\t\treturn { state, entry: found, restored: false };",
+		replace: "\t\treturn { state, entry: found, restored: true };",
+		filter: "withdraws the tombstone"
+	},
 	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
