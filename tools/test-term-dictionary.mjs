@@ -2037,7 +2037,25 @@ test("panel: groups are rows you open, with a way back up", () => {
 	const label = openControl(top, "backend");
 	assert(label !== undefined, "the group row carries the control that opens it");
 	assert(JSON.stringify(label.props.children).includes("backend"), "labelled with the group's name");
-	// And the ROW opens it too, with the same gesture that opens an entry one line below. Only the label
+	// Its actions, on a line of their own — the same shape an entry row has, and for the same reason: the
+	// controls must not move around with the length of what they act on.
+	const groupActions = find(top, (node) => node.props?.["data-term-group-actions"] === "backend")[0];
+	assert(groupActions !== undefined, "the group row carries an action line of its own");
+	const actionTitles = find(groupActions, (node) => typeof node.type !== "function" && typeof node.props?.title === "string").map((node) => node.props.title);
+	assertEqual(actionTitles, ["groupRename", "groupDelete"], "offering to rename or move it, and to delete it");
+	// And pressing one of them must not ALSO open the group: the row itself is a click target now.
+	let entered = 0;
+	groupRows(top)[0].props.onClick({ target: { closest: () => ({}) } });
+	assertEqual(find(render(), (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 0, "a click that landed on a button does not open the group");
+	// Pressing rename opens the form, prefilled with the path.
+	find(groupActions, (node) => node.type !== "function" && node.props?.title === "groupRename")[0].props.onClick();
+	const formed = render();
+	const form = find(formed, (node) => node.props?.["data-term-group-form"] === "backend")[0];
+	assert(form !== undefined, "renaming opens an inline form rather than a browser prompt, which Electron does not implement");
+	assertEqual(find(form, (node) => node.props?.type === "text")[0].props.value, "backend", "prefilled with the group's path");
+	// What the form DOES is `store.renameGroup`, whose decision is asserted at the data level by the check
+	// above; here the subject is that the control exists and is wired to it.
+	assertEqual(typeof find(form, (node) => node.props?.label === "groupRenameApply")[0].props.onClick, "function", "with a control that applies it");
 	// being live is what "the group cannot be clicked into" meant: a reader clicks the row and nothing
 	// happens, because the folder icon, the count and the empty space were all dead.
 	const groupArticle = groupRows(top)[0];
@@ -2088,6 +2106,43 @@ test("panel: groups are rows you open, with a way back up", () => {
 		3,
 		"offering all three levels back"
 	);
+});
+
+test("dictionary: renaming, moving and deleting a group are the same decisions as moving one entry", () => {
+	// A group is a path, so renaming and moving are one act. Each moved entry carries the same stamped
+	// decision a single move does — a bulk move is not an exception to "a move is a decision" — and deleting a
+	// group empties it into the deleted list, because that is the only way a group can be deleted.
+	const { emptyState, editEntry, groupsIn, listEntries, listDeleted, mergeState, renameGroup, deleteGroup } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	let stamp = 10;
+	for (const [term, group] of [["A", "backend"], ["B", "backend/net"], ["C", "backend/net"], ["D", "ops"], ["E", "backend"]]) {
+		state = editEntry(state, term, { definition: { gloss: "g" }, group }, { now: (stamp += 1) }).state;
+	}
+
+	const renamed = renameGroup(state, "backend", "服务端", { now: 100 });
+	assertEqual([renamed.moved, renamed.error], [4, null], "renaming moves the group and everything under it");
+	assertEqual(groupsIn(renamed.state.entries, "").map((each) => `${each.name}:${each.count}`).sort(), ["ops:1", "服务端:4"].sort(), "the old name is gone and the new one holds the same four");
+	assertEqual(listEntries(renamed.state, "", "all", "服务端/net").map((entry) => entry.term).sort(), ["B", "C"], "a nested level comes along, keeping its own name");
+	// The move is a decision, so it survives a merge with the copy that has not heard about it.
+	assertEqual(listEntries(mergeState(renamed.state, state, { now: 150 }), "", "all", "服务端").map((entry) => entry.term).sort(), ["A", "E"], "and it survives a merge with the old document");
+
+	// Renaming onto an existing group merges them, which is what asking for it means.
+	const merged = renameGroup(renamed.state, "服务端", "ops", { now: 200 });
+	assertEqual([merged.moved, groupsIn(merged.state.entries, "").length], [4, 1], "renaming onto another group merges the two");
+	assertEqual(listEntries(merged.state, "", "all", "ops").map((entry) => entry.term).sort(), ["A", "D", "E"], "with everything in one place");
+
+	// The three refusals, each of which would otherwise do something silent and wrong.
+	assertEqual(renameGroup(state, "backend", "", { now: 1 }).error, "no-name", "an empty name is refused");
+	assertEqual(renameGroup(state, "backend", "backend", { now: 1 }).error, "same", "and so is a name that changes nothing");
+	assertEqual(renameGroup(state, "backend", "backend/deep", { now: 1 }).error, "into-itself", "and moving a group inside itself");
+	assertEqual(renameGroup(state, "nope", "x", { now: 1 }).moved, 0, "and a group nobody has simply moves nothing");
+
+	// Deleting a group is delete-what-is-in-it, softly.
+	const deleted = deleteGroup(state, "backend", { now: 300 });
+	assertEqual([deleted.removed, deleted.error], [4, null], "deleting a group removes what is in it");
+	assertEqual(listEntries(deleted.state, "", "all", "ops").map((entry) => entry.term), ["D"], "leaving the other group alone");
+	assertEqual(listDeleted(deleted.state).map((entry) => entry.term).sort(), ["A", "B", "C", "E"], "and putting every one of them on the deleted list, where they can be restored");
+	assertEqual(groupsIn(deleted.state.entries, "").map((each) => each.name), ["ops"], "a group disappears when the last entry in it does, which is the rule that made it appear");
 });
 
 test("style: the notice that covers the composer does not eat clicks", () => {

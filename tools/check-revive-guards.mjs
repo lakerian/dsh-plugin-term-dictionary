@@ -552,10 +552,10 @@ const mutations = [
 		filter: "groups are rows you open"
 	},
 	{
-		name: "only the group's label answers a click, so the row looks dead",
+		name: "a click on the group's own action buttons also opens the group",
 		file: "lib/core/views.js",
-		find: "\t\t\t\t\t\tonClick: () => setGroup(sub.group)\n\t\t\t\t\t},",
-		replace: "\t\t\t\t\t\tonClick: undefined\n\t\t\t\t\t},",
+		find: '\t\t\t\t\t\t\tif (typeof event?.target?.closest === "function" && event.target.closest("button") !== null) return;\n\t\t\t\t\t\t\tsetGroup(sub.group);',
+		replace: "\t\t\t\t\t\t\tsetGroup(sub.group);",
 		filter: "groups are rows you open"
 	},
 	{
@@ -599,6 +599,27 @@ const mutations = [
 		find: "\t\t.sort((left, right) => (right.createdAt ?? 0) - (left.createdAt ?? 0) || left.term.localeCompare(right.term));",
 		replace: "\t\t.sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0) || left.term.localeCompare(right.term));",
 		filter: "groups are directories"
+	},
+	{
+		name: "a group rename moves only the group itself and leaves its sub-groups behind",
+		file: "lib/core/dictionary.js",
+		find: '\tfor (const entry of state.entries.filter((each) => each.deletedAt === 0 && (each.group === source || each.group.startsWith(`${source}/`)))) {\n\t\tstamp += 1;\n\t\tconst rest = entry.group === source ? "" : entry.group.slice(source.length + 1);',
+		replace: '\tfor (const entry of state.entries.filter((each) => each.deletedAt === 0 && each.group === source)) {\n\t\tstamp += 1;\n\t\tconst rest = "";',
+		filter: "renaming, moving and deleting a group"
+	},
+	{
+		name: "a group can be moved inside itself",
+		file: "lib/core/dictionary.js",
+		find: '\tif (target.startsWith(`${source}/`)) return { state, moved: 0, error: "into-itself" };',
+		replace: "",
+		filter: "renaming, moving and deleting a group"
+	},
+	{
+		name: "deleting a group hard-deletes instead of putting the entries on the deleted list",
+		file: "lib/core/dictionary.js",
+		find: "\t\tnext = removeEntry(next, entry.id, { now: stamp }).state;\n\t\tremoved += 1;\n\t}\n\treturn { state: next, removed, error: null };",
+		replace: "\t\tnext = { ...next, entries: next.entries.filter((each) => each.id !== entry.id) };\n\t\tremoved += 1;\n\t}\n\treturn { state: next, removed, error: null };",
+		filter: "renaming, moving and deleting a group"
 	},
 	{
 		name: "the build guard copies literal text again",
