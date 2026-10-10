@@ -552,6 +552,20 @@ const mutations = [
 		filter: "groups are rows you open"
 	},
 	{
+		name: "only the group's label answers a click, so the row looks dead",
+		file: "lib/core/views.js",
+		find: "\t\t\t\t\t\tonClick: () => setGroup(sub.group)\n\t\t\t\t\t},",
+		replace: "\t\t\t\t\t\tonClick: undefined\n\t\t\t\t\t},",
+		filter: "groups are rows you open"
+	},
+	{
+		name: "the entry cards no longer fill their track, leaving a strip under the short ones",
+		file: "lib/core/views.js",
+		find: '\treturn { ...applyStyles.list, display: "grid", alignItems: rowLayout === "compact" ? "start" : "stretch", gridTemplateColumns };',
+		replace: '\treturn { ...applyStyles.list, display: "grid", alignItems: "start", gridTemplateColumns };',
+		filter: "layout follows the column"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',

@@ -1666,6 +1666,9 @@ test("panel: the entry list's layout follows the column preference", () => {
 	assertEqual(auto?.props["data-term-columns"], "auto", "a fresh install lays the list out automatically");
 	assertEqual(auto?.props.style.display, "grid", "which is a grid rather than one column");
 	assert(String(auto?.props.style.gridTemplateColumns).includes("auto-fill"), "the grid fits as many columns as the panel allows");
+	// The cards in a row share its height by default: the complaint was the empty strips under the short
+	// ones, and a grid track is only as tall as its tallest cell unless every cell is told to fill it.
+	assertEqual(auto?.props.style.alignItems, "stretch", "with the cards filling the row's height, so no strip is left");
 
 	settings.set("entryColumns", "2");
 	const two = listOf(renderPanel());
@@ -2015,6 +2018,17 @@ test("panel: groups are rows you open, with a way back up", () => {
 	const label = openControl(top, "backend");
 	assert(label !== undefined, "the group row carries the control that opens it");
 	assert(JSON.stringify(label.props.children).includes("backend"), "labelled with the group's name");
+	// And the ROW opens it too, with the same gesture that opens an entry one line below. Only the label
+	// being live is what "the group cannot be clicked into" meant: a reader clicks the row and nothing
+	// happens, because the folder icon, the count and the empty space were all dead.
+	const groupArticle = groupRows(top)[0];
+	assert(typeof groupArticle.props.onClick === "function", "and the whole row answers a click, like an entry row does");
+	groupArticle.props.onClick();
+	assertEqual(find(render(), (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 1, "which enters the group");
+	// Back to the top by the breadcrumb's first crumb, so the rest of the check starts where it did.
+	const rootCrumb = find(render(), (node) => node.type === "button" && typeof node.props?.title === "string" && node.props.title.startsWith("groupGo|"))[0];
+	rootCrumb.props.onClick();
+	assertEqual(termsShown(render()).sort(), ["alpha"], "and the root crumb brings the top level back");
 	assertEqual(find(top, (node) => node.props?.children === 'groupCount|{"count":"3"}').length > 0, true, "and says how much is inside it, counting everything below");
 
 	// Entering it.
@@ -2324,8 +2338,8 @@ test("panel: the settings page renders every preference and changes the store", 
 	// Eleven preferences, and the control each one's VALUE SHAPE calls for: two states get a switch,
 	// a few named choices get an option bar, and a number in a range gets a slider plus a box.
 	assertEqual(switches.length, 6, "six switches: collect, annotate, explain, paragraph, code names, Chinese terms");
-	assertEqual(bars.length, 4, "four option bars: language, depth, entry columns, minimum length");
-	assertEqual(bars.map((bar) => bar.props.options.length), [3, 3, 4, 5], "each bar shows every one of its values");
+	assertEqual(bars.length, 5, "five option bars: language, depth, row height, entry columns, minimum length");
+	assertEqual(bars.map((bar) => bar.props.options.length), [3, 3, 2, 4, 5], "each bar shows every one of its values");
 	assertEqual(fields.length, 2, "two delay fields: the hover entry delay and the hover exit delay");
 	assertEqual(
 		fields.map((field) => [field.props.min, field.props.max]),
@@ -2360,9 +2374,10 @@ test("panel: the settings page renders every preference and changes the store", 
 	const depthBar = bars.find((bar) => bar.props.label === "explainDepthName");
 	const lengthBar = bars.find((bar) => bar.props.label === "collectMinLengthName");
 	const columnBar = bars.find((bar) => bar.props.label === "entryColumnsName");
+	const rowsBar = bars.find((bar) => bar.props.label === "entryRowsName");
 	assert(
-		langBar !== undefined && depthBar !== undefined && lengthBar !== undefined && columnBar !== undefined,
-		"all four option bars must be reachable by name"
+		langBar !== undefined && depthBar !== undefined && lengthBar !== undefined && columnBar !== undefined && rowsBar !== undefined,
+		"every option bar must be reachable by name"
 	);
 	assertEqual(langBar.props.options.map((option) => option.value), ["auto", "zh", "en"], "the language bar offers every language");
 	assertEqual(langBar.props.options.length, 3, "and offers one option per value");
@@ -2377,6 +2392,12 @@ test("panel: the settings page renders every preference and changes the store", 
 	assertEqual(columnBar.props.options.map((option) => option.value), ["auto", "1", "2", "3"], "the layout bar offers auto and a fixed count");
 	columnBar.props.onSelect("2");
 	assertEqual(store.getSnapshot().entryColumns, "2", "choosing a layout reaches the store");
+	// Row height answers the second half of the same complaint — the gaps under short cards in a grid — so it
+	// is asserted the same way, and it starts uniform so no gap is left by default.
+	assertEqual(rowsBar.props.options.map((option) => option.value), ["uniform", "compact"], "the row-height bar offers both readings");
+	assertEqual(store.getSnapshot().entryRows, "uniform", "starting uniform, which is the reading that leaves no strip");
+	rowsBar.props.onSelect("compact");
+	assertEqual(store.getSnapshot().entryRows, "compact", "and choosing compact reaches the store");
 
 	// The entry list no longer renders any of them, and carries the entry to the page instead.
 	const index = bundle.registered.findIndex((options) => options.name === "main");
