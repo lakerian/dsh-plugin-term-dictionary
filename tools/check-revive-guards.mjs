@@ -561,9 +561,30 @@ const mutations = [
 	{
 		name: "the entry cards no longer fill their track, leaving a strip under the short ones",
 		file: "lib/core/views.js",
-		find: '\treturn { ...applyStyles.list, display: "grid", alignItems: rowLayout === "compact" ? "start" : "stretch", gridTemplateColumns };',
-		replace: '\treturn { ...applyStyles.list, display: "grid", alignItems: "start", gridTemplateColumns };',
+		find: '\t\talignItems: rowLayout === "compact" ? "start" : "stretch",',
+		replace: '\t\talignItems: "start",',
 		filter: "layout follows the column"
+	},
+	{
+		name: "the grid stretches its rows to fill the panel, so two cards fill the window",
+		file: "lib/core/views.js",
+		find: '\t\talignContent: "start",',
+		replace: "",
+		filter: "layout follows the column"
+	},
+	{
+		name: "a group card is stretched to the height of the entry beside it",
+		file: "lib/core/views.js",
+		find: '\t\t\t\t\t\tstyle: { ...applyStyles.row, alignSelf: "start" },',
+		replace: "\t\t\t\t\t\tstyle: applyStyles.row,",
+		filter: "groups are rows you open"
+	},
+	{
+		name: "the breadcrumb is a grid cell again, so it floats in the middle of the row",
+		file: "lib/core/views.js",
+		find: '\t\t\t\t\t{ style: { ...applyStyles.breadcrumb, gridColumn: "1 / -1" }, "data-term-breadcrumb": group },',
+		replace: '\t\t\t\t\t{ style: applyStyles.breadcrumb, "data-term-breadcrumb": group },',
+		filter: "groups are rows you open"
 	},
 	{
 		name: "the build guard copies literal text again",

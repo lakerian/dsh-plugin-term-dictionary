@@ -1669,6 +1669,15 @@ test("panel: the entry list's layout follows the column preference", () => {
 	// The cards in a row share its height by default: the complaint was the empty strips under the short
 	// ones, and a grid track is only as tall as its tallest cell unless every cell is told to fill it.
 	assertEqual(auto?.props.style.alignItems, "stretch", "with the cards filling the row's height, so no strip is left");
+	// But the ROWS are as tall as their content: a grid stretches its rows to fill its container otherwise,
+	// and two cards in a tall panel then became two 700px boxes — equal height taken much too far.
+	assertEqual(auto?.props.style.alignContent, "start", "while the rows stay as tall as their content");
+
+	// The compact reading is the other answer to the same complaint, and it is a preference.
+	settings.set("entryRows", "compact");
+	assertEqual(listOf(renderPanel())?.props.style.alignItems, "start", "the compact reading keeps each card its own height");
+	settings.set("entryRows", "uniform");
+	assertEqual(listOf(renderPanel())?.props.style.alignItems, "stretch", "and uniform is what a fresh install gets");
 
 	settings.set("entryColumns", "2");
 	const two = listOf(renderPanel());
@@ -2013,6 +2022,9 @@ test("panel: groups are rows you open, with a way back up", () => {
 	// At the top level: the group row, and only the entries filed there.
 	const top = render();
 	assertEqual(groupRows(top).map((node) => node.props["data-term-group"]), ["backend"], "the top level lists its group as a row");
+	// Its own height, not the track's: a group has no body text, so filling a three-line entry's height left
+	// an empty box the size of that entry.
+	assertEqual(groupRows(top)[0].props.style.alignSelf, "start", "and the group card keeps its own height rather than the row's");
 	assertEqual(termsShown(top).sort(), ["alpha"], "and only the entries filed at that level");
 	assertEqual(find(top, (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 0, "with no breadcrumb, because there is nowhere to go back to");
 	const label = openControl(top, "backend");
@@ -2035,6 +2047,10 @@ test("panel: groups are rows you open, with a way back up", () => {
 	label.props.onClick();
 	const inside = render();
 	assertEqual(find(inside, (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 1, "entering a group shows where you are");
+	// Spanning the whole row, because as a grid CELL it was stretched to the track's height and its text
+	// centred in the middle of it — which is how the breadcrumb ended up floating halfway down the panel.
+	const crumbBar = find(inside, (node) => node.props?.["data-term-breadcrumb"] !== undefined)[0];
+	assertEqual(crumbBar.props.style.gridColumn, "1 / -1", "with the breadcrumb spanning the row instead of sitting in one cell");
 	assertEqual(groupRows(inside).map((node) => node.props["data-term-group"]), ["backend/net"], "the level inside lists its own groups");
 	assertEqual(termsShown(inside).sort(), ["beta"], "and its own entries, not the ones from the level above");
 
