@@ -138,16 +138,20 @@ const mutations = [
 		filter: "transferExport"
 	},
 	{
-		name: "the import page stops passing the opt-in to the plan",
+		// Retargeted when the two import paths became one: the opt-in used to be passed from the transfer
+		// page's own `planImport` call, and it now lives in the shared `importEntries` — the same claim,
+		// asserted where the decision actually is (and therefore for both pages at once).
+		name: "the import path stops passing the opt-in to the plan",
 		file: `lib/core/views.js`,
-		find: "store.getState().deletedKeys ?? new Set(), { includeDeleted });",
-		replace: "store.getState().deletedKeys ?? new Set());",
+		find: "includeDeleted: options?.includeDeleted === true",
+		replace: "includeDeleted: false",
 		filter: "transferImport"
 	},
 	{
+		// Retargeted with the shared import path: same claim, now asserted where the count is summed.
 		name: "the import report forgets the records the file could not use",
 		file: `lib/core/views.js`,
-		find: "duplicates: plan.duplicates + (parsed.skipped ?? 0)",
+		find: "duplicates: plan.duplicates + (options?.skipped ?? 0)",
 		replace: "duplicates: plan.duplicates",
 		filter: "transferImport"
 	},
@@ -356,6 +360,41 @@ const mutations = [
 		replace: "\t\t\tif (false) {\n\t\t\t\treturn sendJson(res, 200, { ok: true, index: entry.index, fetchedAt: entry.fetchedAt, cached: true, stale: true, error: fetched.error });\n\t\t\t}",
 		filter: "source:",
 		suite: "host"
+	},
+	{
+		name: "a source is added without the https rule",
+		file: "lib/core/views.js",
+		find: "\t\tif (refusal !== null) return say(t(`packError_${refusal}`));",
+		replace: "\t\tif (false) return say(t(`packError_${refusal}`));",
+		filter: "packPage"
+	},
+	{
+		name: "the source list keeps entries the fetch would refuse",
+		file: "lib/core/settings.js",
+		find: "\t\tif (refuseUrl(url) !== null) continue;",
+		replace: "\t\tif (false) continue;",
+		filter: "source list keeps"
+	},
+	{
+		name: "previewing a listed pack offers nothing to import",
+		file: "lib/core/views.js",
+		find: "\t\t\tsetIncoming({ pack: answer.pack, summary: answer.summary, label: listed.name });",
+		replace: "\t\t\tsetIncoming(null);",
+		filter: "packPage"
+	},
+	{
+		name: "the shared import path plans but never writes",
+		file: "lib/core/views.js",
+		find: "\tfor (const entry of plan.accepted) {",
+		replace: "\tfor (const entry of plan.accepted) { break;",
+		filter: "packPage"
+	},
+	{
+		name: "the pack from a source is fetched without the promised digest",
+		file: "lib/core/api.js",
+		find: 'const digest = typeof sha256 === "string" && sha256 !== "" ? `&sha256=${encodeURIComponent(sha256)}` : "";',
+		replace: 'const digest = "";',
+		filter: "source fetch"
 	},
 	{
 		name: "the build guard copies literal text again",

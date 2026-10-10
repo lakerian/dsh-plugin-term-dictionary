@@ -122,6 +122,12 @@ function loadBundle(options = {}) {
 			observe() {}
 			disconnect() {}
 		},
+		// The page has these; the sandbox must too, or a plugin that uses one behaves differently under
+		// test than in the browser. `URL` was the one that mattered: without it every source address was
+		// parsed as malformed, so a check about refusing `http` saw `bad-url` instead of `not-https`.
+		URL,
+		URLSearchParams,
+		Blob: globalThis.Blob,
 		AbortController: undefined,
 		fetch: options.fetch
 	};
@@ -1579,6 +1585,35 @@ test("pack: a pack is content, sliced by category, and never a tombstone", () =>
 	}
 });
 
+test("settings: the source list keeps only what can actually be fetched", () => {
+	// The sources are configuration the user typed, and the store is where it is validated. The rule is
+	// `pack.js`'s own `refuseUrl` — the same one the host applies before it fetches anything — so a
+	// stored list cannot hold a source the transport would later refuse, and the page cannot disagree
+	// with the host about what a usable source is.
+	const { normalizeSettings, MAX_SOURCES } = loadCore("settings.js");
+	const normalized = normalizeSettings({
+		packSources: [
+			"https://cdn.jsdelivr.net/gh/a/b@main/index.json",
+			"http://insecure.example/index.json",
+			"file:///c:/index.json",
+			"https://user:pw@example.com/index.json",
+			"not a url",
+			"  https://example.com/spaced.json  ",
+			"https://cdn.jsdelivr.net/gh/a/b@main/index.json",
+			42,
+			null
+		]
+	});
+	assertEqual(normalized.packSources, ["https://cdn.jsdelivr.net/gh/a/b@main/index.json", "https://example.com/spaced.json"], "only https, trimmed and deduplicated");
+	assertEqual(normalizeSettings({}).packSources, [], "a record with no sources gets an empty list");
+	assertEqual(normalizeSettings({ packSources: "https://example.com/i.json" }).packSources, [], "a bare string is not a list");
+	const many = normalizeSettings({ packSources: Array.from({ length: 30 }, (unused, index) => `https://example.com/${index}.json`) });
+	assertEqual(many.packSources.length, MAX_SOURCES, "and the list is capped rather than unbounded");
+	// A fresh array each read: a snapshot is compared by identity, and a shared default array would let
+	// one page's edit appear in another page's defaults.
+	assertEqual(normalizeSettings({}).packSources === normalizeSettings({}).packSources, false, "each read is its own array");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
@@ -2506,7 +2541,14 @@ async function asyncChecks() {
 					for (const child of node) walk(child);
 					return;
 				}
+				// Match the node, THEN render it if it is a component. Matching first is what keeps the
+				// component's own props visible to a check (`OptionBar` is found by its `onSelect`), and
+				// rendering after is what keeps its children visible (the shared checklist's boxes).
 				if (match(node)) found.push(node);
+				if (typeof node.type === "function") {
+					walk(node.type(node.props));
+					return;
+				}
 				walk(node.props?.children);
 			};
 			walk(tree);
@@ -2534,7 +2576,15 @@ async function asyncChecks() {
 					for (const child of node) walk(child, inCategory);
 					return;
 				}
+				// A function component's children live behind its own call, so a walker that stops at the
+				// boundary reads an empty page. It bit here: the checklist moved behind one shared
+				// component when the pack page started using it, and this check went from five boxes to
+				// none without the page changing what it draws.
 				const here = inCategory || typeof node.props?.["data-term-domain"] === "string";
+				if (typeof node.type === "function") {
+					walk(node.type(node.props), here);
+					return;
+				}
 				if (node.props?.type === "checkbox" && here) found.push(node);
 				walk(node.props?.children, here);
 			};
@@ -2964,6 +3014,139 @@ async function asyncChecks() {
 		editorCopy.props.onClick();
 		await drainMicrotasks();
 		assertEqual(copied[0], "Quorum（多数派确认）\n改过的解释\n例：reached quorum", "including the edit that has not been saved yet");
+	});
+
+	await asyncCheck("panel: the packs page publishes, reads a code, and browses a source", "packPage", async () => {
+		// The whole page driven end to end, with the four host calls stubbed: what a check can prove here
+		// is the WIRING — that the buttons reach the right call, that a refusal is said out loud, and
+		// that an import taken this way goes through the same path a file import does.
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { zh: "多数派确认", gloss: "写入需要多少个副本确认。" } });
+
+		const memory = new Map();
+		const storage = {
+			getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+			setItem: (key, value) => memory.set(key, String(value)),
+			removeItem: (key) => memory.delete(key)
+		};
+		const { createSettingsStore } = loadCore("settings.js");
+		const settings = createSettingsStore({ storage });
+
+		const calls = [];
+		const shared = {
+			term: "Sidecar",
+			key: "sidecar",
+			definition: { zh: "边车", gloss: "把辅助功能放进同一个 Pod。" },
+			domain: "架构"
+		};
+		const packOf = (name) => ({ kind: "dsh-term-dictionary-pack", version: 1, id: "a/b", name, count: 1, entries: [shared] });
+		const packApi = {
+			build: async (input) => {
+				calls.push({ what: "build", input });
+				return { ok: true, pack: { ...packOf("后端黑话"), entries: [] }, summary: { count: 1, explained: 1, domains: [{ domain: "分布式", count: 1 }] }, sha256: "a".repeat(64), bytes: 512, code: "dshpack1:STUB" };
+			},
+			decode: async (value) => {
+				calls.push({ what: "decode", value });
+				return { ok: true, pack: packOf("别人的包"), summary: { count: 1, explained: 1, domains: [] } };
+			},
+			index: async (url) => {
+				calls.push({ what: "index", url });
+				return { ok: true, index: { kind: "dsh-term-dictionary-index", version: 1, count: 1, packs: [{ id: "a/b", name: "后端黑话", author: "lakerian", license: "", description: "一份后端黑话", domains: ["分布式"], count: 1, sha256: "b".repeat(64), url: "https://example.com/p.json" }] }, cached: false };
+			},
+			fetch: async (url, sha256) => {
+				calls.push({ what: "fetch", url, sha256 });
+				return { ok: true, pack: packOf("后端黑话"), summary: { count: 1, explained: 1, domains: [] }, sha256: "b".repeat(64), cached: false };
+			}
+		};
+		const props = { store: face.store, t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`), settings, packApi, setToast: () => {} };
+		const render = () => {
+			react.__beginRender();
+			return bundle.exports.packsPage(props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+		const button = (tree, label) => find(tree, (node) => node.props?.label === label && typeof node.props.onClick === "function")[0];
+		const text = (tree) => {
+			const parts = [];
+			const gather = (node) => {
+				if (typeof node === "string" || typeof node === "number") parts.push(String(node));
+				else if (Array.isArray(node)) node.forEach(gather);
+				else if (node !== null && typeof node === "object") gather(node.props?.children);
+			};
+			gather(tree);
+			return parts.join(" | ");
+		};
+
+		// --- sharing
+		button(render(), "packMakeCode").props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(calls[0].what, "build", "the share button asks the host to build");
+		assertEqual(calls[0].input.code, true, "and to encode a code with it");
+		assertEqual(calls[0].input.scope, "all", "from the whole dictionary by default");
+		const built = render();
+		assertEqual(find(built, (node) => node.props?.["data-term-pack-code"] === "true")[0].props.value, "dshpack1:STUB", "the code appears for copying");
+		assert(text(built).includes("packDigest"), "with the digest and size, so the artifact is identifiable");
+
+		// --- a code
+		const draft = find(render(), (node) => node.props?.label === "packCodeLabel" && typeof node.props.onChange === "function")[0];
+		draft.props.onChange("dshpack1:FROM-SOMEONE");
+		button(render(), "packRead").props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual([calls[1].what, calls[1].value], ["decode", "dshpack1:FROM-SOMEONE"], "reading a code asks the host to decode exactly what was pasted");
+		const preview = render();
+		assertEqual(find(preview, (node) => node.props?.["data-term-pack-preview"] === "true").length, 1, "and the pack is previewed before anything is imported");
+		assert(text(preview).includes("别人的包"), "naming what arrived");
+		button(render(), "packImport").props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assert(face.store.find("Sidecar") !== null, "importing writes the entry through the ordinary store path");
+		assert(text(render()).includes("transferImported"), "and the page reports what it did");
+
+		// --- sources: the refusal is loud, and a good URL is stored
+		const sourceField = find(render(), (node) => node.props?.label === "packAddSourceLabel" && typeof node.props.onChange === "function")[0];
+		sourceField.props.onChange("http://insecure.example/index.json");
+		button(render(), "packAddSource").props.onClick();
+		assertEqual(settings.getSnapshot().packSources, [], "an http source is refused");
+		const draftNow = find(render(), (node) => node.props?.label === "packAddSourceLabel")[0];
+		assert(text(render()).includes("packError_not-https"), `and the page says why, saw ${JSON.stringify(text(render()))} draft=${JSON.stringify(draftNow?.props?.value)}`);
+		// The refusal is `not-https` rather than `bad-url`: the sandbox has `URL` now, so the page's own
+		// check says what the host's check says. Without it, every address came out malformed.
+		const field2 = find(render(), (node) => node.props?.label === "packAddSourceLabel" && typeof node.props.onChange === "function")[0];
+		field2.props.onChange("https://example.com/index.json");
+		button(render(), "packAddSource").props.onClick();
+		assertEqual(settings.getSnapshot().packSources, ["https://example.com/index.json"], "an https source is kept in the settings");
+
+		// --- refresh, preview and import one pack from the source
+		button(render(), "packRefresh").props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(calls[calls.length - 1].what, "index", "refreshing asks the source");
+		const listed = render();
+		assertEqual(find(listed, (node) => typeof node.props?.["data-term-pack"] === "string").length, 1, "and the pack it offers is listed");
+		button(render(), "packPreview").props.onClick();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(calls[calls.length - 1].what, "fetch", "previewing fetches that pack");
+		assertEqual(calls[calls.length - 1].sha256, "b".repeat(64), "carrying the digest the index promised");
+		assertEqual(find(render(), (node) => node.props?.["data-term-pack-preview"] === "true").length, 1, "and it is previewed like a code is");
 	});
 
 	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {
@@ -3437,6 +3620,29 @@ async function asyncChecks() {
 		assertEqual(await client.feedback({ sessionId: "s-1" }), { ok: false, error: "unavailable" }, "a composition without the channel is reported as such");
 		answer = { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ ok: false })) };
 		assertEqual(await client.feedback({ sessionId: "s-1" }), { ok: false, error: "rejected" }, "and an unlabelled refusal still says refused");
+	});
+
+	await asyncCheck("api: the source calls carry the url and the digest the index promised", "source fetch", async () => {
+		// The two GETs are built by string concatenation, which is exactly where a digest gets dropped or
+		// a URL gets pasted in unencoded — and a dropped digest is the difference between verifying a pack
+		// and trusting whatever arrived.
+		const { createApiClient } = loadCore("api.js");
+		const seen = [];
+		const client = createApiClient({
+			base: "http://127.0.0.1",
+			fetchImpl: (url) => {
+				seen.push(String(url));
+				return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ ok: true, index: { packs: [] }, pack: { entries: [] }, summary: { count: 0 }, sha256: "x" })) });
+			}
+		});
+		await client.sourceIndex("https://example.com/a b/index.json", true);
+		assertEqual(seen[0], "http://127.0.0.1/dsh-term-dictionary/source/index?url=https%3A%2F%2Fexample.com%2Fa%20b%2Findex.json&refresh=1", "the index call encodes the url and asks to refresh");
+		await client.sourceIndex("https://example.com/i.json", false);
+		assertEqual(seen[1].endsWith("&refresh=1"), false, "and leaves the cache alone when not asked to refresh");
+		await client.sourcePack("https://example.com/p.json", "abc123");
+		assertEqual(seen[2], "http://127.0.0.1/dsh-term-dictionary/source/pack?url=https%3A%2F%2Fexample.com%2Fp.json&sha256=abc123", "the pack call carries the promised digest");
+		await client.sourcePack("https://example.com/p.json");
+		assertEqual(seen[3].includes("sha256"), false, "and omits it when the index promised none");
 	});
 
 	await asyncCheck("beacon: an oversized report names what it dropped instead of being cut", "beaconFit", async () => {
