@@ -304,14 +304,40 @@ if (!/^[^/]+\/[^/]+$/.test(repoSlug)) {
 
 //#endregion
 
+/**
+ * End the process WITHOUT `process.exit()`.
+ *
+ * With a fetch keep-alive socket still closing, `process.exit()` on Windows aborts the process with
+ * `UV_HANDLE_CLOSING` — `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c` — and
+ * the exit code becomes `0xC0000409`. That is exactly what `pnpm publish` reported, as
+ * `ERR_PNPM_EXECUTOR_LIFECYCLE_SCRIPT_FAILED` / `exited with exit code: 0xc0000409`. The gate had PASSED:
+ * the crash was in its own exit, so publishing was blocked by a crash in the check rather than by anything
+ * the check found. A gate that cannot say "yes" is worse than no gate at all.
+ *
+ * Closing the fetch dispatcher first is what lets the loop actually drain — undici otherwise holds its
+ * socket for the keep-alive timeout, turning a three-second gate into a slow one.
+ */
+async function end(code) {
+	const dispatcher = globalThis[Symbol.for("undici.globalDispatcher.1")];
+	if (dispatcher !== null && dispatcher !== undefined && typeof dispatcher.close === "function") {
+		try {
+			await dispatcher.close();
+		} catch (error) {
+			/* a dispatcher that refuses to close must not become the failure */
+		}
+	}
+	process.exitCode = code;
+}
+
 console.log('');
 if (failures.length === 0) {
 	console.log('release-ready. the two steps that need your hands:');
 	console.log(`  1. npm login  &&  cd ${root}  &&  pnpm publish${scoped ? ' --access public' : ''}`);
 	console.log('     (pnpm refuses to publish a dirty working tree: commit first, or add --no-git-checks)');
 	console.log('  2. add the entry to awesome-dsh-plugin (a PR; the market picks it up within a day)');
-	process.exit(0);
+	await end(0);
+} else {
+	console.log(`${failures.length} check(s) failed:`);
+	for (const name of failures) console.log(`  - ${name}`);
+	await end(1);
 }
-console.log(`${failures.length} check(s) failed:`);
-for (const name of failures) console.log(`  - ${name}`);
-process.exit(1);
