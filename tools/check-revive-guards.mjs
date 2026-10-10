@@ -105,8 +105,8 @@ const mutations = [
 	{
 		name: "the panel never renders the deleted view",
 		file: `lib/core/views.js`,
-		find: "showingDeleted\n\t\t\t\t? h(DeletedList,",
-		replace: "false\n\t\t\t\t? h(DeletedList,",
+		find: "showingDeleted\n\t\t\t\t\t? h(DeletedList,",
+		replace: "false\n\t\t\t\t\t? h(DeletedList,",
 		filter: "revivePanel"
 	},
 	{
@@ -529,6 +529,27 @@ const mutations = [
 		find: "\t\treturn { state, entry: found, restored: false };",
 		replace: "\t\treturn { state, entry: found, restored: true };",
 		filter: "withdraws the tombstone"
+	},
+	{
+		name: "a group row opens something other than the group it names",
+		file: "lib/core/views.js",
+		find: "\t\t\t\t\t\t\t\tonClick: () => setGroup(sub.group),",
+		replace: "\t\t\t\t\t\t\t\tonClick: () => setGroup(group),",
+		filter: "groups are rows you open"
+	},
+	{
+		name: "the panel lists every level at once instead of one level at a time",
+		file: "lib/core/store.js",
+		find: "\t\t\treturn listEntries(state, query, filter, at);",
+		replace: '\t\t\treturn listEntries(state, query, filter, "");',
+		filter: "groups are rows you open"
+	},
+	{
+		name: "the breadcrumb cannot take you back up",
+		file: "lib/core/views.js",
+		find: "\t\t\t\t\t\t\t\t\tonClick: () => setGroup(crumb.path),",
+		replace: "\t\t\t\t\t\t\t\t\tonClick: () => setGroup(crumb.label),",
+		filter: "groups are rows you open"
 	},
 	{
 		name: "the build guard copies literal text again",

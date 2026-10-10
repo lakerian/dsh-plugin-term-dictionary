@@ -1958,6 +1958,94 @@ test("dictionary: restoring a deleted term withdraws the tombstone instead of ou
 	assertEqual([created.restored, findEntry(created.state, "Freshterm") !== undefined], [false, true], "a term that was never here is created");
 });
 
+test("panel: groups are rows you open, with a way back up", () => {
+	// The UI half of the group tree. A group is the same KIND of thing as an entry — something you open —
+	// so it is a row of the same list rather than a sidebar, and the breadcrumb is the way back: a
+	// directory you can only enter is a trap.
+	const react = makeReactStub();
+	const bundle = loadBundle({ react });
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	const face = bundle.registered[index].inject();
+	const { createSettingsStore } = loadCore("settings.js");
+	const memory = new Map();
+	const settings = createSettingsStore({
+		storage: {
+			getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+			setItem: (key, value) => memory.set(key, String(value)),
+			removeItem: (key) => memory.delete(key)
+		}
+	});
+	for (const [term, group] of [["Alpha", ""], ["Beta", "backend"], ["Gamma", "backend/net"], ["Delta", "backend/net"]]) {
+		face.store.saveEntry(term, { definition: { gloss: "g" }, group });
+	}
+
+	const render = () => {
+		react.__beginRender();
+		return bundle.components[index]({ ...face, settings, t: (key, values) => (values === undefined ? key : `${key}|${JSON.stringify(values)}`), setToast: () => {} });
+	};
+	const walk = (node, visit) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child, visit);
+			return;
+		}
+		visit(node);
+		if (typeof node.type === "function") walk(node.type(node.props), visit);
+		else walk(node.props?.children, visit);
+	};
+	const find = (tree, match) => {
+		const found = [];
+		walk(tree, (node) => {
+			if (match(node)) found.push(node);
+		});
+		return found;
+	};
+	const groupRows = (tree) => find(tree, (node) => node.type === "article" && typeof node.props?.["data-term-group"] === "string");
+	const termsShown = (tree) => find(tree, (node) => typeof node.props?.["data-term-entry"] === "string").map((node) => node.props["data-term-entry"]);
+	const openControl = (tree, group) => {
+		const row = find(tree, (node) => node.type === "article" && node.props?.["data-term-group"] === group)[0];
+		return find(row, (node) => node.type === "button" && node.props?.title === "groupOpen")[0];
+	};
+
+	// At the top level: the group row, and only the entries filed there.
+	const top = render();
+	assertEqual(groupRows(top).map((node) => node.props["data-term-group"]), ["backend"], "the top level lists its group as a row");
+	assertEqual(termsShown(top).sort(), ["alpha"], "and only the entries filed at that level");
+	assertEqual(find(top, (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 0, "with no breadcrumb, because there is nowhere to go back to");
+	const label = openControl(top, "backend");
+	assert(label !== undefined, "the group row carries the control that opens it");
+	assert(JSON.stringify(label.props.children).includes("backend"), "labelled with the group's name");
+	assertEqual(find(top, (node) => node.props?.children === 'groupCount|{"count":"3"}').length > 0, true, "and says how much is inside it, counting everything below");
+
+	// Entering it.
+	label.props.onClick();
+	const inside = render();
+	assertEqual(find(inside, (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 1, "entering a group shows where you are");
+	assertEqual(groupRows(inside).map((node) => node.props["data-term-group"]), ["backend/net"], "the level inside lists its own groups");
+	assertEqual(termsShown(inside).sort(), ["beta"], "and its own entries, not the ones from the level above");
+
+	// And coming back, by the breadcrumb rather than by a hidden gesture.
+	const crumbs = find(inside, (node) => node.type === "button" && typeof node.props?.title === "string" && node.props.title.startsWith("groupGo|"));
+	assertEqual(crumbs.length, 2, "the breadcrumb offers every level, including the top");
+	crumbs[0].props.onClick();
+	const back = render();
+	assertEqual(find(back, (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 0, "going back to the top level removes the breadcrumb");
+	assertEqual(termsShown(back).sort(), ["alpha"], "and shows the top level again");
+
+	// Two levels deep, which is what the folder import produces.
+	openControl(back, "backend").props.onClick();
+	const nested = render();
+	openControl(nested, "backend/net").props.onClick();
+	const leaf = render();
+	assertEqual(termsShown(leaf).sort(), ["delta", "gamma"], "the leaf level shows its entries");
+	assertEqual(find(leaf, (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 1, "with the whole path behind it");
+	assertEqual(
+		find(leaf, (node) => node.type === "button" && typeof node.props?.title === "string" && node.props.title.startsWith("groupGo|")).length,
+		3,
+		"offering all three levels back"
+	);
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
