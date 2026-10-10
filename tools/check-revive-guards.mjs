@@ -573,10 +573,10 @@ const mutations = [
 		filter: "layout follows the column"
 	},
 	{
-		name: "a group card is stretched to the height of the entry beside it",
+		name: "a group card keeps its own height instead of filling the row it is in",
 		file: "lib/core/views.js",
-		find: '\t\t\t\t\t\tstyle: { ...applyStyles.row, alignSelf: "start" },',
-		replace: "\t\t\t\t\t\tstyle: applyStyles.row,",
+		find: '\t\t\t\t\t\tstyle: applyStyles.row,\n\t\t\t\t\t\t"data-term-group": sub.group,',
+		replace: '\t\t\t\t\t\tstyle: { ...applyStyles.row, alignSelf: "start" },\n\t\t\t\t\t\t"data-term-group": sub.group,',
 		filter: "groups are rows you open"
 	},
 	{
@@ -585,6 +585,20 @@ const mutations = [
 		find: '\t\t\t\t\t{ style: { ...applyStyles.breadcrumb, gridColumn: "1 / -1" }, "data-term-breadcrumb": group },',
 		replace: '\t\t\t\t\t{ style: applyStyles.breadcrumb, "data-term-breadcrumb": group },',
 		filter: "groups are rows you open"
+	},
+	{
+		name: "a group card is a name over blank space again, with no preview of what is inside",
+		file: "lib/core/views.js",
+		find: '{ style: applyStyles.groupPreview, "data-term-group-sample": sub.group },',
+		replace: '{ style: applyStyles.groupPreview, "data-term-group-sample": undefined },',
+		filter: "groups are rows you open"
+	},
+	{
+		name: "the preview names the oldest terms rather than the newest few",
+		file: "lib/core/dictionary.js",
+		find: "\t\t.sort((left, right) => (right.createdAt ?? 0) - (left.createdAt ?? 0) || left.term.localeCompare(right.term));",
+		replace: "\t\t.sort((left, right) => (left.createdAt ?? 0) - (right.createdAt ?? 0) || left.term.localeCompare(right.term));",
+		filter: "groups are directories"
 	},
 	{
 		name: "the build guard copies literal text again",

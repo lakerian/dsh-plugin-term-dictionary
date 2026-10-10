@@ -1737,8 +1737,11 @@ test("dictionary: groups are directories — one level at a time, and a move is 
 	// ride on the content, and merging one entry from two windows then wiped it, order-dependently.
 	const { emptyState, editEntry, findEntry, listEntries, groupsIn, mergeState } = loadCore("dictionary.js");
 	let state = emptyState({ now: 1 });
+	// Distinct times, so "newest first" is a claim the fixture can actually support — with every entry stamped
+	// the same, the sample falls back to the alphabetical tie-break and the assertion stops meaning anything.
+	let stamp = 10;
 	for (const [term, group] of [["Alpha", ""], ["Beta", "backend"], ["Gamma", "backend/net"], ["Delta", "backend/net"], ["Epsilon", "ops"]]) {
-		state = editEntry(state, term, { definition: { gloss: "g" }, group }, { now: 10 }).state;
+		state = editEntry(state, term, { definition: { gloss: "g" }, group }, { now: (stamp += 1) }).state;
 	}
 
 	// One level at a time: what is filed exactly here, not everything below it.
@@ -1748,9 +1751,13 @@ test("dictionary: groups are directories — one level at a time, and a move is 
 	assertEqual(listEntries(state, "", "all").map((entry) => entry.term), ["Alpha"], "a caller that asks for no group gets the top level, which is what the panel did before groups existed");
 	assertEqual(listEntries(state, "ga", "all", "backend/net").map((entry) => entry.term), ["Gamma"], "the search still narrows within the level");
 
-	// The group rows: immediate children, with a count that covers everything under each.
-	assertEqual(groupsIn(state.entries, ""), [{ group: "backend", name: "backend", count: 3 }, { group: "ops", name: "ops", count: 1 }], "the top level lists its groups with counts");
-	assertEqual(groupsIn(state.entries, "backend"), [{ group: "backend/net", name: "net", count: 2 }], "and a group lists its own");
+	// The group rows: immediate children, with a count that covers everything under each and a SAMPLE of what
+	// is inside, newest first — the row has to say something once it is as tall as the entries beside it.
+	const topGroups = groupsIn(state.entries, "");
+	assertEqual(topGroups.map(({ group, name, count }) => ({ group, name, count })), [{ group: "backend", name: "backend", count: 3 }, { group: "ops", name: "ops", count: 1 }], "the top level lists its groups with counts");
+	assertEqual(topGroups[0].sample, ["Delta", "Gamma", "Beta"], "and names the newest few of what is inside it");
+	assertEqual(topGroups[1].sample, ["Epsilon"], "however few there are");
+	assertEqual(groupsIn(state.entries, "backend"), [{ group: "backend/net", name: "net", count: 2, sample: ["Delta", "Gamma"] }], "and a group lists its own");
 	assertEqual(groupsIn(state.entries, "backend/net"), [], "a leaf has none");
 	assertEqual(groupsIn(state.entries, "nope"), [], "and a path nobody filed anything under is empty rather than an error");
 
@@ -2022,9 +2029,9 @@ test("panel: groups are rows you open, with a way back up", () => {
 	// At the top level: the group row, and only the entries filed there.
 	const top = render();
 	assertEqual(groupRows(top).map((node) => node.props["data-term-group"]), ["backend"], "the top level lists its group as a row");
-	// Its own height, not the track's: a group has no body text, so filling a three-line entry's height left
-	// an empty box the size of that entry.
-	assertEqual(groupRows(top)[0].props.style.alignSelf, "start", "and the group card keeps its own height rather than the row's");
+	// It fills its row, now that the height carries something: the preview below is what makes the same
+	// height as the entry beside it information rather than blank space.
+	assertEqual(groupRows(top)[0].props.style.alignSelf, undefined, "the group card fills its row like the entries do");
 	assertEqual(termsShown(top).sort(), ["alpha"], "and only the entries filed at that level");
 	assertEqual(find(top, (node) => node.props?.["data-term-breadcrumb"] !== undefined).length, 0, "with no breadcrumb, because there is nowhere to go back to");
 	const label = openControl(top, "backend");
@@ -2042,6 +2049,13 @@ test("panel: groups are rows you open, with a way back up", () => {
 	rootCrumb.props.onClick();
 	assertEqual(termsShown(render()).sort(), ["alpha"], "and the root crumb brings the top level back");
 	assertEqual(find(top, (node) => node.props?.children === 'groupCount|{"count":"3"}').length > 0, true, "and says how much is inside it, counting everything below");
+	// And a line naming what is inside, so the card is not a name over blank space: the point of filling the
+	// row's height is that the height then carries something.
+	const sampleLine = find(top, (node) => node.props?.["data-term-group-sample"] === "backend")[0];
+	assert(sampleLine !== undefined, "with a line saying what is inside it");
+	const sampleText = String(sampleLine.props.children);
+	assert(["Beta", "Gamma", "Delta"].every((name) => sampleText.includes(name)), `naming the terms inside, saw ${sampleText}`);
+	assertEqual(sampleText.includes("groupSampleMore"), false, "and no \"and more\" when the sample already names all of them");
 
 	// Entering it.
 	label.props.onClick();
