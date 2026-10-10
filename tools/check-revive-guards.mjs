@@ -490,6 +490,20 @@ const mutations = [
 		filter: "groups are directories"
 	},
 	{
+		name: "the list sorts pinned first again, so pinning moves the row",
+		file: "lib/core/dictionary.js",
+		find: "\treturn matched.sort((left, right) => (right.createdAt ?? 0) - (left.createdAt ?? 0) || left.term.localeCompare(right.term));",
+		replace: "\treturn matched.sort((left, right) => Number(right.pinned) - Number(left.pinned) || (right.createdAt ?? 0) - (left.createdAt ?? 0));",
+		filter: "an action never moves"
+	},
+	{
+		name: "the row's actions go back on the title line",
+		file: "lib/core/views.js",
+		find: '{ style: applyStyles.rowActions, "data-term-actions": entry.key },',
+		replace: '{ style: applyStyles.rowHead, "data-term-actions": entry.key },',
+		filter: "the pin leads the row"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',

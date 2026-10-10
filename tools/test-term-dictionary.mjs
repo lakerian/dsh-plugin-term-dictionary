@@ -451,13 +451,16 @@ test("dictionary: unpinning survives the merge with a copy that is still pinned"
 	assertEqual(dictionaryModule.mergeDocuments(sighted, pinned, { now: 900 }).entries[0].pinned, true, "a sighting must not clear a pin");
 });
 
-test("dictionary: listEntries filters and orders pinned first", () => {
+test("dictionary: listEntries filters, and an action does not reorder it", () => {
 	let state = dictionaryModule.emptyState({ now: 1 });
 	state = dictionaryModule.recordSighting(state, { term: "alpha" }, { now: 2 }).state;
 	state = dictionaryModule.recordSighting(state, { term: "beta" }, { now: 3 }).state;
 	state = dictionaryModule.editEntry(state, "alpha", { definition: { gloss: "解释" }, pinned: true }, { now: 4 }).state;
-	const pinnedFirst = dictionaryModule.listEntries(state, "", "all");
-	assertEqual(pinnedFirst[0].term, "alpha", "a pinned entry sorts first");
+	const order = dictionaryModule.listEntries(state, "", "all").map((entry) => entry.term);
+	// Pinned FIRST was the old rule, and it is the behaviour a reader reported as a problem: pinning sent
+	// the row to the top, so an action moved the thing being looked at. The pin is on the row and 「已钉选」
+	// gathers them, so ordering no longer has to say it.
+	assertEqual(order, ["beta", "alpha"], "the list stays in creation order however entries are pinned");
 	assertEqual(dictionaryModule.listEntries(state, "bet", "all").length, 1, "search narrows the list");
 	assertEqual(dictionaryModule.listEntries(state, "", "unexplained").map((entry) => entry.term), ["beta"], "the unexplained filter");
 	assertEqual(dictionaryModule.listEntries(state, "", "pinned").map((entry) => entry.term), ["alpha"], "the pinned filter");
@@ -1749,6 +1752,102 @@ test("dictionary: groups are directories — one level at a time, and a move is 
 	assertEqual(findEntry(editEntry(home, "Beta", { definition: { gloss: "g2" } }, { now: 60 }).state, "Beta").group, "", "while an unrelated edit leaves the group where it is");
 	// Two moves inside one millisecond still have an order: the stamp moves strictly forward.
 	assertEqual(findEntry(editEntry(state, "Beta", { group: "ops" }, { now: 10 }).state, "Beta").group, "ops", "a move in the same millisecond as the last one still wins");
+});
+
+test("dictionary: an action never moves the row it acted on", () => {
+	// Reported: "pinning moves the entry to the top". It did — the list sorted pinned first, then
+	// unexplained first, then by when each term was last SEEN, so pinning, answering a prompt, and merely
+	// mentioning a term again all shuffled the list under the reader's hand. Creation time is the one thing
+	// no action changes.
+	const { emptyState, editEntry, listEntries } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	state = editEntry(state, "Older", { definition: { gloss: "g" } }, { now: 10 }).state;
+	state = editEntry(state, "Newer", { definition: { gloss: "g" } }, { now: 20 }).state;
+	const before = listEntries(state, "", "all").map((entry) => entry.term);
+	assertEqual(before, ["Newer", "Older"], "the newest term is first to begin with");
+
+	const pinned = editEntry(state, "Older", { pinned: true }, { now: 30 }).state;
+	assertEqual(listEntries(pinned, "", "all").map((entry) => entry.term), before, "pinning does not move it");
+	assertEqual(listEntries(pinned, "", "pinned").map((entry) => entry.term), ["Older"], "while the pinned view still gathers it");
+	assertEqual(listEntries(pinned, "", "all").find((entry) => entry.term === "Older").pinned, true, "and the row itself says so, which is why the order has no job left");
+
+	const edited = editEntry(pinned, "Older", { definition: { gloss: "answered" } }, { now: 40 }).state;
+	assertEqual(listEntries(edited, "", "all").map((entry) => entry.term), before, "nor does editing or explaining it");
+	const unseen = { ...edited, entries: edited.entries.map((entry) => (entry.term === "Older" ? { ...entry, lastSeenAt: 9000 } : entry)) };
+	assertEqual(listEntries(unseen, "", "all").map((entry) => entry.term), before, "nor does the transcript mentioning it again");
+	const newer = editEntry(edited, "Newest", { definition: { gloss: "g" } }, { now: 50 }).state;
+	assertEqual(listEntries(newer, "", "all").map((entry) => entry.term), ["Newest", ...before], "while a genuinely new term does arrive at the top");
+});
+
+test("panel: the pin leads the row and the actions sit on their own line", () => {
+	// Reported: "put the entry's small controls on the second line and the pin before the title, so an
+	// action cannot produce a one-off layout". On the title line the controls moved from row to row with
+	// the length of the term and the number of badges; the pin is a STATE of the entry, so it belongs with
+	// the title, and the four actions belong where every row has them.
+	const react = makeReactStub();
+	const bundle = loadBundle({ react });
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	const face = bundle.registered[index].inject();
+	const { createSettingsStore } = loadCore("settings.js");
+	const memory = new Map();
+	const settings = createSettingsStore({
+		storage: {
+			getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+			setItem: (key, value) => memory.set(key, String(value)),
+			removeItem: (key) => memory.delete(key)
+		}
+	});
+	face.store.saveEntry("Quorum", { definition: { gloss: "多数派确认" } });
+
+	const tree = (() => {
+		react.__beginRender();
+		return bundle.components[index]({ ...face, settings, t: (key) => key, setToast: () => {} });
+	})();
+	const walk = (node, visit) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child, visit);
+			return;
+		}
+		visit(node);
+		if (typeof node.type === "function") walk(node.type(node.props), visit);
+		else walk(node.props?.children, visit);
+	};
+	const actions = [];
+	const heads = [];
+	walk(tree, (node) => {
+		if (typeof node.props?.["data-term-actions"] === "string") actions.push(node);
+		if (node.type === "div" && node.props?.style?.display === "flex" && node.props?.style?.gap === "6px" && node.props?.style?.flexWrap === "wrap") heads.push(node);
+	});
+	assertEqual(actions.length, 1, "the row has an action line of its own");
+	// It is a DIFFERENT line from the title, which is the whole point: same style would mean the controls
+	// share the title's line and drift from row to row with the length of the term.
+	assertEqual(actions[0].props.style, { display: "flex", alignItems: "center", gap: "6px", marginTop: "2px" }, "with the action line's own layout");
+	const buttons = [];
+	walk(actions[0], (node) => {
+		// Only RENDERED elements: `walk` visits a component and then its output, and both carry the same
+		// props, so counting every visit would report each button twice.
+		if (typeof node.type === "function") return;
+		if (typeof node.props?.title === "string" && typeof node.props?.onClick === "function") buttons.push(node.props.title);
+	});
+	assertEqual(buttons, ["copyEntry", "feedbackTitle", "edit", "remove"], "carrying every action, in one order, on every row");
+
+	const head = heads[0];
+	const headButtons = [];
+	walk(head, (node) => {
+		if (typeof node.type === "function") return;
+		if (typeof node.props?.title === "string" && typeof node.props?.onClick === "function") headButtons.push(node.props.title);
+	});
+	// The pin, then the term itself — whose own click opens the editor, which is why it is a button too.
+	assertEqual(headButtons, ["pin", "edit"], "and the title line carries the pin and the term, and no action");
+	// The pin is a state, so it also has to come BEFORE the term it belongs to.
+	const order = [];
+	walk(head, (node) => {
+		if (typeof node.type === "function") return;
+		if (node.props?.title === "pin" || node.props?.title === "unpin") order.push("pin");
+		else if (node.props?.children === "Quorum") order.push("term");
+	});
+	assertEqual(order, ["pin", "term"], "with the pin in front of the term");
 });
 
 test("style: the notice that covers the composer does not eat clicks", () => {
