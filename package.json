@@ -57,6 +57,9 @@
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
+  "scripts": {
+    "prepublishOnly": "node tools/check-release-ready.mjs"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
