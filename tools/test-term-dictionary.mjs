@@ -1685,7 +1685,7 @@ test("transfer: a folder is read as one import, and it names what it could not u
 	// be read are named rather than swallowing the whole folder.
 	const { collectFolderImport } = loadCore("transfer.js");
 	const dictionary = JSON.stringify({ kind: "dsh-term-dictionary", version: 1, entries: [{ term: "Quorum", key: "quorum", definition: { gloss: "g" } }] });
-	const packFile = JSON.stringify({ kind: "dsh-term-dictionary-pack", version: 1, id: "a/b", name: "B", entries: [{ term: "Sidecar", key: "sidecar", definition: { gloss: "s" }, domain: "架构" }] });
+	const packFile = JSON.stringify({ kind: "dsh-term-dictionary-pack", version: 1, id: "a/b", name: "B", entries: [{ term: "Sidecar", key: "sidecar", definition: { gloss: "s" }, group: "vendor" }] });
 	const indexFile = JSON.stringify({ kind: "dsh-term-dictionary-index", version: 1, packs: [] });
 	const files = [
 		{ path: "topics/backend.json", text: dictionary },
@@ -1702,15 +1702,53 @@ test("transfer: a folder is read as one import, and it names what it could not u
 	assertEqual(plain.entries.map((entry) => entry.key).sort(), ["quorum", "sidecar"], "and their entries are what comes back");
 	assertEqual(plain.skipped.map((entry) => entry.name).sort(), ["broken.json", "topics/index.json"], "the unusable ones are named");
 	assertEqual(plain.skipped.map((entry) => entry.error).sort(), ["no-entries", "not-json"], "with the reason each one failed");
-	assertEqual(plain.entries.find((entry) => entry.key === "quorum").domain, "", "and no category is invented for an entry that had none");
-	assertEqual(plain.entries.find((entry) => entry.key === "sidecar").domain, "架构", "while one the file named keeps its own");
+	assertEqual(plain.entries.find((entry) => entry.key === "quorum").group, "", "and no group is invented for an entry that had none");
+	assertEqual(plain.entries.find((entry) => entry.key === "sidecar").group, "vendor", "while one the file itself filed keeps its group");
 
-	const withFolders = collectFolderImport(files, { useFolderAsDomain: true });
-	assertEqual(withFolders.entries.find((entry) => entry.key === "quorum").domain, "topics", "the folder names the category");
-	assertEqual(withFolders.entries.find((entry) => entry.key === "sidecar").domain, "架构", "unless the file already named one, which wins");
+	const withFolders = collectFolderImport(files, { useFolderAsGroup: true });
+	assertEqual(withFolders.entries.find((entry) => entry.key === "quorum").group, "topics", "the folder names the group");
+	assertEqual(withFolders.entries.find((entry) => entry.key === "sidecar").group, "vendor", "unless the file already filed it, which wins");
+	const nested = collectFolderImport([{ path: "picked/backend/net/deep.json", text: dictionary }], { useFolderAsGroup: true });
+	assertEqual(nested.entries[0].group, "picked/backend/net", "and a nested path becomes a nested group, starting with the folder that was picked");
 	const nothingUsable = collectFolderImport([{ path: "broken.json", text: "{" }], { useFolderAsDomain: true });
 	assertEqual([nothingUsable.used, nothingUsable.entries.length, nothingUsable.skipped.length], [0, 0, 1], "a folder with nothing usable reports that rather than importing nothing quietly");
 	assertEqual(collectFolderImport([], {}).files, 0, "and an empty folder is not an error in itself");
+});
+
+test("dictionary: groups are directories — one level at a time, and a move is a decision", () => {
+	// The data half of "an entry group, the same size as an entry, that you click into". One string field
+	// carries any depth, so nothing else had to be added to the document — but a MOVE is a decision the
+	// user can make and unmake, and content-merge rules cannot carry one: the first attempt let the group
+	// ride on the content, and merging one entry from two windows then wiped it, order-dependently.
+	const { emptyState, editEntry, findEntry, listEntries, groupsIn, mergeState } = loadCore("dictionary.js");
+	let state = emptyState({ now: 1 });
+	for (const [term, group] of [["Alpha", ""], ["Beta", "backend"], ["Gamma", "backend/net"], ["Delta", "backend/net"], ["Epsilon", "ops"]]) {
+		state = editEntry(state, term, { definition: { gloss: "g" }, group }, { now: 10 }).state;
+	}
+
+	// One level at a time: what is filed exactly here, not everything below it.
+	assertEqual(listEntries(state, "", "all", "").map((entry) => entry.term), ["Alpha"], "the top level shows what is filed there");
+	assertEqual(listEntries(state, "", "all", "backend").map((entry) => entry.term), ["Beta"], "and a group shows its own");
+	assertEqual(listEntries(state, "", "all", "backend/net").map((entry) => entry.term).sort(), ["Delta", "Gamma"], "however deep");
+	assertEqual(listEntries(state, "", "all").map((entry) => entry.term), ["Alpha"], "a caller that asks for no group gets the top level, which is what the panel did before groups existed");
+	assertEqual(listEntries(state, "ga", "all", "backend/net").map((entry) => entry.term), ["Gamma"], "the search still narrows within the level");
+
+	// The group rows: immediate children, with a count that covers everything under each.
+	assertEqual(groupsIn(state.entries, ""), [{ group: "backend", name: "backend", count: 3 }, { group: "ops", name: "ops", count: 1 }], "the top level lists its groups with counts");
+	assertEqual(groupsIn(state.entries, "backend"), [{ group: "backend/net", name: "net", count: 2 }], "and a group lists its own");
+	assertEqual(groupsIn(state.entries, "backend/net"), [], "a leaf has none");
+	assertEqual(groupsIn(state.entries, "nope"), [], "and a path nobody filed anything under is empty rather than an error");
+
+	// Moving is a stamped decision, so it survives a merge in either direction — including moving back out.
+	const plain = editEntry(emptyState({ now: 1 }), "Beta", { definition: { gloss: "g" } }, { now: 10 }).state;
+	assertEqual(findEntry(mergeState(state, plain, { now: 30 }), "Beta").group, "backend", "a move survives a merge with the copy that has not heard about it");
+	assertEqual(findEntry(mergeState(plain, state, { now: 30 }), "Beta").group, "backend", "in either order");
+	const home = editEntry(state, "Beta", { group: "" }, { now: 40 }).state;
+	assertEqual(findEntry(home, "Beta").group, "", "and an entry can be moved back to the top level");
+	assertEqual(findEntry(mergeState(home, state, { now: 50 }), "Beta").group, "", "which is itself a decision that survives a merge");
+	assertEqual(findEntry(editEntry(home, "Beta", { definition: { gloss: "g2" } }, { now: 60 }).state, "Beta").group, "", "while an unrelated edit leaves the group where it is");
+	// Two moves inside one millisecond still have an order: the stamp moves strictly forward.
+	assertEqual(findEntry(editEntry(state, "Beta", { group: "ops" }, { now: 10 }).state, "Beta").group, "ops", "a move in the same millisecond as the last one still wins");
 });
 
 test("style: the notice that covers the composer does not eat clicks", () => {

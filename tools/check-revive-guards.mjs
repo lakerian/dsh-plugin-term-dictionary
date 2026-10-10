@@ -63,8 +63,8 @@ const mutations = [
 	{
 		name: "the deleted filter falls back to the live list",
 		file: `lib/core/store.js`,
-		find: 'if (filter === "deleted") return dictionary.listDeleted(state, query);',
-		replace: 'if (filter === "deleted") return listEntries(state, query, "all");',
+		find: 'if (filter === "deleted") return dictionary.listDeleted(state, query).filter((entry) => (typeof entry.group === "string" ? entry.group : "") === at);',
+		replace: 'if (filter === "deleted") return listEntries(state, query, "all", at);',
 		filter: "revivePanel"
 	},
 	{
@@ -455,10 +455,10 @@ const mutations = [
 		filter: "a folder is read as one import"
 	},
 	{
-		name: "a folder import overwrites a category the file itself named",
+		name: "a folder import overwrites a group the file itself named",
 		file: "lib/core/transfer.js",
-		find: '\t\t\tentries.push(folder !== "" && !hasDomain ? { ...entry, domain: folder } : entry);',
-		replace: '\t\t\tentries.push(folder !== "" ? { ...entry, domain: folder } : entry);',
+		find: '\t\t\tentries.push(folder !== "" && !hasGroup ? { ...entry, group: folder } : entry);',
+		replace: '\t\t\tentries.push(folder !== "" ? { ...entry, group: folder } : entry);',
 		filter: "a folder is read as one import"
 	},
 	{
@@ -467,6 +467,27 @@ const mutations = [
 		find: '\t\t\tconst moved = typeof props.onImported === "function" && props.onImported() === true;',
 		replace: "\t\t\tconst moved = false;",
 		filter: "importMoved"
+	},
+	{
+		name: "a group move is carried by the content merge instead of its own stamp",
+		file: "lib/core/entries.js",
+		find: "\t\tgroup: (incoming.groupAt ?? 0) > (current.groupAt ?? 0) ? incoming.group : current.group,",
+		replace: "\t\tgroup: current.group ?? incoming.group,",
+		filter: "groups are directories"
+	},
+	{
+		name: "an entry cannot be moved back to the top level",
+		file: "lib/core/dictionary.js",
+		find: '\tconst mentionsGroup = patch !== null && patch !== undefined && Object.prototype.hasOwnProperty.call(patch, "group");',
+		replace: '\tconst mentionsGroup = patch !== null && patch !== undefined && typeof patch.group === "string" && patch.group !== "";',
+		filter: "groups are directories"
+	},
+	{
+		name: "a group lists everything below it instead of one level",
+		file: "lib/core/dictionary.js",
+		find: '\t\tif ((typeof entry.group === "string" ? entry.group : "") !== base) return false;',
+		replace: "\t\tvoid base;",
+		filter: "groups are directories"
 	},
 	{
 		name: "the build guard copies literal text again",
