@@ -1,0 +1,132 @@
+{
+	"kind": "dsh-term-dictionary-pack",
+	"version": 1,
+	"id": "lakerian/test-distributed",
+	"name": "分布式系统测试包",
+	"description": "12 个分布式系统术语，用来试导入、搜索、分类与批量选择。",
+	"author": "lakerian",
+	"license": "MIT",
+	"createdAt": "2026-10-11T01:00:00.000Z",
+	"entries": [
+		{
+			"term": "Quorum",
+			"key": "quorum",
+			"definition": {
+				"zh": "法定人数",
+				"gloss": "一次写入需要多少个副本确认才算成功。",
+				"usage": "Five nodes, quorum of three."
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Split brain",
+			"key": "split brain",
+			"definition": {
+				"zh": "脑裂",
+				"gloss": "集群分成两半，各自都以为自己是主。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Fencing token",
+			"key": "fencing token",
+			"definition": {
+				"zh": "隔离令牌",
+				"gloss": "带单调递增编号的租约凭证，用来把旧主挡在门外。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Vector clock",
+			"key": "vector clock",
+			"definition": {
+				"zh": "向量时钟",
+				"gloss": "用每个节点的计数拼出的因果顺序。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Read-your-writes",
+			"key": "read-your-writes",
+			"definition": {
+				"zh": "读己之写",
+				"gloss": "同一个人写完之后立刻能读到自己的写入。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Hinted handoff",
+			"key": "hinted handoff",
+			"definition": {
+				"zh": "提示移交",
+				"gloss": "目标节点不在时先把写入寄存在别的节点。",
+				"usage": "Cassandra does hinted handoff."
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Phi accrual",
+			"key": "phi accrual",
+			"definition": {
+				"zh": "φ 累积故障检测",
+				"gloss": "按心跳间隔的分布算一个怀疑度，而不是用固定超时。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Lease",
+			"key": "lease",
+			"definition": {
+				"zh": "租约",
+				"gloss": "一段时间内有效的独占授权。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Two-phase commit",
+			"key": "two-phase commit",
+			"definition": {
+				"zh": "两阶段提交",
+				"gloss": "先问所有人能不能提交，再让所有人提交。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Idempotent",
+			"key": "idempotent",
+			"definition": {
+				"zh": "幂等",
+				"gloss": "重复执行一次和一次的效果相同。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Anti-entropy",
+			"key": "anti-entropy",
+			"definition": {
+				"zh": "反熵",
+				"gloss": "后台互相比较并修补副本差异。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		},
+		{
+			"term": "Causal consistency",
+			"key": "causal consistency",
+			"definition": {
+				"zh": "因果一致性",
+				"gloss": "有因果关系的操作对所有节点保持同样顺序。",
+				"usage": ""
+			},
+			"domain": "分布式"
+		}
+	]
+}

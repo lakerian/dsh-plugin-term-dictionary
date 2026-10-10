@@ -1,0 +1,42 @@
+{
+	"kind": "dsh-term-dictionary-pack",
+	"version": 1,
+	"id": "lakerian/test-revive",
+	"name": "撤回删除测试包",
+	"description": "专供测试「导入我删除过的词条」：先删掉「墓碑探针」，再用这个包把它导回来。",
+	"author": "lakerian",
+	"license": "MIT",
+	"createdAt": "2026-10-11T01:00:00.000Z",
+	"entries": [
+		{
+			"term": "墓碑探针",
+			"key": "墓碑探针",
+			"definition": {
+				"zh": "tombstone probe",
+				"gloss": "专门用来验证「删除 → 导入撤回」这条路的术语。",
+				"usage": ""
+			},
+			"domain": "测试"
+		},
+		{
+			"term": "回撤哨兵",
+			"key": "回撤哨兵",
+			"definition": {
+				"zh": "revive sentinel",
+				"gloss": "第二个探针：验证同一个包里多条被删词条能否一起回来。",
+				"usage": ""
+			},
+			"domain": "测试"
+		},
+		{
+			"term": "未收录样本",
+			"key": "未收录样本",
+			"definition": {
+				"zh": "never-collected sample",
+				"gloss": "验证导入新词条：这个词条从未在你的词典里出现过。",
+				"usage": ""
+			},
+			"domain": "测试"
+		}
+	]
+}

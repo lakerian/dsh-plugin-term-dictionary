@@ -1,0 +1,92 @@
+{
+	"kind": "dsh-term-dictionary-pack",
+	"version": 1,
+	"id": "lakerian/test-network",
+	"name": "网络测试包",
+	"description": "8 个网络术语，用来试「按分类导出」与再导入。",
+	"author": "lakerian",
+	"license": "MIT",
+	"createdAt": "2026-10-11T01:00:00.000Z",
+	"entries": [
+		{
+			"term": "Head-of-line blocking",
+			"key": "head-of-line blocking",
+			"definition": {
+				"zh": "队头阻塞",
+				"gloss": "队首的一个包卡住，后面所有包都等着。",
+				"usage": ""
+			},
+			"domain": "网络"
+		},
+		{
+			"term": "Nagle",
+			"key": "nagle",
+			"definition": {
+				"zh": "纳格尔算法",
+				"gloss": "把小包攒起来再发，代价是延迟。",
+				"usage": ""
+			},
+			"domain": "网络"
+		},
+		{
+			"term": "BDP",
+			"key": "bdp",
+			"definition": {
+				"zh": "带宽时延积",
+				"gloss": "链路上能同时在途的字节数，窗口至少要这么大。",
+				"usage": ""
+			},
+			"domain": "网络"
+		},
+		{
+			"term": "Slow start",
+			"key": "slow start",
+			"definition": {
+				"zh": "慢启动",
+				"gloss": "拥塞窗口从很小开始指数增长。",
+				"usage": ""
+			},
+			"domain": "网络"
+		},
+		{
+			"term": "ECMP",
+			"key": "ecmp",
+			"definition": {
+				"zh": "等价多路径",
+				"gloss": "按哈希在多条等价路径之间分流。",
+				"usage": ""
+			},
+			"domain": "网络"
+		},
+		{
+			"term": "MTU discovery",
+			"key": "mtu discovery",
+			"definition": {
+				"zh": "路径 MTU 发现",
+				"gloss": "试探路径上能通过的最大包，避免分片。",
+				"usage": ""
+			},
+			"domain": "网络"
+		},
+		{
+			"term": "Retransmission ambiguity",
+			"key": "retransmission ambiguity",
+			"definition": {
+				"zh": "重传歧义",
+				"gloss": "收到的 ACK 到底确认的是原包还是重传包。",
+				"usage": ""
+			},
+			"domain": "网络"
+		},
+		{
+			"term": "SYN flood",
+			"key": "syn flood",
+			"definition": {
+				"zh": "SYN 洪水",
+				"gloss": "只发握手第一步，把半连接队列占满。",
+				"usage": ""
+			},
+			"domain": "网络"
+		}
+	]
+}

@@ -2,7 +2,7 @@
   "kind": "dsh-term-dictionary-index",
   "version": 1,
   "updatedAt": 1791637568255,
-  "count": 1,
+  "count": 4,
   "packs": [
     {
       "id": "包测试",
@@ -19,6 +19,45 @@
       "count": 20,
       "sha256": "493267dd5f6e8a507f3edf206bf31cc530391a68af9f2a3c6c320777a9c64f8a",
       "url": "https://cdn.jsdelivr.net/gh/lakerian/dsh-plugin-term-dictionary@main/packs/term-pack-%E5%8C%85%E6%B5%8B%E8%AF%95.json"
+    },
+    {
+      "id": "lakerian/test-revive",
+      "name": "撤回删除测试包",
+      "description": "专供测试「导入我删除过的词条」：先删掉「墓碑探针」，再用这个包把它导回来。",
+      "author": "lakerian",
+      "license": "MIT",
+      "domains": [
+        "测试"
+      ],
+      "count": 3,
+      "sha256": "9b52969dea26912c103087c74359079e29fca76f8208cea251435c831cfbc5b5",
+      "url": "https://cdn.jsdelivr.net/gh/lakerian/dsh-plugin-term-dictionary@main/packs/term-pack-test-revive.json"
+    },
+    {
+      "id": "lakerian/test-distributed",
+      "name": "分布式系统测试包",
+      "description": "12 个分布式系统术语，用来试导入、搜索、分类与批量选择。",
+      "author": "lakerian",
+      "license": "MIT",
+      "domains": [
+        "分布式"
+      ],
+      "count": 12,
+      "sha256": "6ef6de79631be45be766e3ea747f6ec93228e7e716b603e150866287ababf851",
+      "url": "https://cdn.jsdelivr.net/gh/lakerian/dsh-plugin-term-dictionary@main/packs/term-pack-test-distributed.json"
+    },
+    {
+      "id": "lakerian/test-network",
+      "name": "网络测试包",
+      "description": "8 个网络术语，用来试「按分类导出」与再导入。",
+      "author": "lakerian",
+      "license": "MIT",
+      "domains": [
+        "网络"
+      ],
+      "count": 8,
+      "sha256": "64c2ff6ec883ac505e645bb3d1b7622c8fcbd91ac3a34fcc368b40a63f439095",
+      "url": "https://cdn.jsdelivr.net/gh/lakerian/dsh-plugin-term-dictionary@main/packs/term-pack-test-network.json"
     }
   ]
 }

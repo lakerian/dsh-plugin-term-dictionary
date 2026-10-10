@@ -1850,6 +1850,76 @@ test("panel: the pin leads the row and the actions sit on their own line", () =>
 	assertEqual(order, ["pin", "term"], "with the pin in front of the term");
 });
 
+test("pack: the parsers read the TEXT that production actually hands them", () => {
+	// Reported: "the pack imports and nothing appears". Both parsers accepted only an already-parsed
+	// OBJECT, while the host fetches a file and passes the BODY — so every source answered `not-an-object`,
+	// and every pack fetched from a source did too. That reads like a bad URL rather than like a bug, and
+	// the checks passed because they handed the parsers objects: production hands them text.
+	const { parsePack, parseIndex } = loadCore("pack.js");
+	// Hand-written rather than built, because what is under test is the PARSER's tolerance of text — and a
+	// fixture written the way a real file on disk looks is the honest input for that.
+	const packFile = JSON.stringify({
+		kind: "dsh-term-dictionary-pack",
+		version: 1,
+		id: "a/b",
+		name: "B",
+		author: "a",
+		license: "MIT",
+		createdAt: "2026-10-11T00:00:00.000Z",
+		entries: [{ term: "Quorum", key: "quorum", definition: { zh: "法定人数", gloss: "g", usage: "" } }]
+	});
+	const indexFile = JSON.stringify({ kind: "dsh-term-dictionary-index", version: 1, updatedAt: 1, count: 1, packs: [{ id: "a/b", name: "B", url: "https://example.test/b.json", sha256: "x", entries: 1 }] });
+
+	assertEqual(parsePack(packFile).ok, true, "a pack read from the text a fetch returns");
+	assertEqual(parsePack(packFile).pack.entries.length, 1, "with its entries");
+	assertEqual(parsePack(JSON.parse(packFile)).ok, true, "and the same pack as an object still reads");
+	assertEqual(parseIndex(indexFile).ok, true, "an index read from the text a fetch returns");
+	assertEqual(parseIndex(indexFile).index.packs.length, 1, "with its rows");
+	assertEqual(parseIndex(JSON.parse(indexFile)).ok, true, "and the same index as an object still reads");
+
+	// What is not a pack is still refused, and with the reason it failed rather than one generic error.
+	assertEqual(parsePack("{").error, "not-json", "broken text is not JSON");
+	assertEqual(parsePack("[]").error, "not-an-object", "an array is not a pack");
+	assertEqual(parsePack('{"kind":"something-else"}').error, "not-a-pack", "and a file that is not a pack says so");
+	assertEqual(parseIndex("{").error, "not-json", "broken index text too");
+	assertEqual(parseIndex('{"kind":"dsh-term-dictionary-pack"}').error, "not-an-index", "and an index that is not an index");
+});
+
+test("import: a brand-new term arrives, and the report says so", () => {
+	// The gap a reader named: nothing checked importing terms the dictionary had NEVER seen, only the
+	// interesting mixed cases. Without it, "I imported a file and nothing appeared" cannot be told apart
+	// from "the entries went somewhere I was not looking". The page's own path through this is covered by
+	// the panel check that imports a real file; this is the decision underneath it.
+	const { emptyState, editEntry, listEntries, findEntry, listDeleted } = loadCore("dictionary.js");
+	const { parseImport, planImport } = loadCore("transfer.js");
+
+	let state = emptyState({ now: 1 });
+	state = editEntry(state, "Quorum", { definition: { gloss: "已有" } }, { now: 10 }).state;
+	const file = JSON.stringify({
+		kind: "dsh-term-dictionary",
+		version: 1,
+		entries: [
+			{ term: "Freshterm", key: "freshterm", definition: { zh: "新词条", gloss: "从没出现过" } },
+			{ term: "Quorum", key: "quorum", definition: { gloss: "文件里的" } }
+		]
+	});
+	const parsed = parseImport(file);
+	assertEqual(parsed.ok, true, "the file parses");
+	const plan = planImport(state.entries, parsed.entries, new Set(), { includeDeleted: false });
+	assertEqual(plan.accepted.map((entry) => entry.term), ["Freshterm"], "exactly the term that is new is accepted");
+	assertEqual(plan.existing.map((entry) => entry.term), ["Quorum"], "and the one already here is left alone");
+
+	// The write the page performs, applied here: `importEntries` calls exactly this for each accepted entry.
+	for (const entry of plan.accepted) {
+		state = editEntry(state, entry.term, { definition: entry.definition, domain: entry.domain, aliases: entry.aliases, pinned: entry.pinned }, { now: 20 }).state;
+	}
+	assertEqual(findEntry(state, "Freshterm") !== undefined, true, "the new term is in the document");
+	assertEqual(listEntries(state, "", "all").map((entry) => entry.term).sort(), ["Freshterm", "Quorum"], "and in the list the panel draws");
+	assertEqual(listEntries(state, "fresh", "all").map((entry) => entry.term), ["Freshterm"], "where a search for it finds it");
+	assertEqual(listDeleted(state).length, 0, "and nothing was deleted on the way");
+	assertEqual(findEntry(state, "Quorum").definition.gloss, "已有", "while the entry that was already here kept its own text");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its

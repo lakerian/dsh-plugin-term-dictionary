@@ -504,6 +504,13 @@ const mutations = [
 		filter: "the pin leads the row"
 	},
 	{
+		name: "the index parser only accepts an object again, so every source fails",
+		file: "lib/core/pack.js",
+		find: '\tconst raw2 = value;\n\tif (raw2.kind !== INDEX_KIND) return { ok: false, error: "not-an-index" };',
+		replace: '\tconst raw2 = raw;\n\tif (raw2.kind !== INDEX_KIND) return { ok: false, error: "not-an-index" };',
+		filter: "TEXT that production"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',
