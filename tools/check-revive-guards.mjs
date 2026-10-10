@@ -427,6 +427,27 @@ const mutations = [
 		filter: "packPage"
 	},
 	{
+		name: "a fixed column count is ignored and the layout is chosen anyway",
+		file: "lib/core/views.js",
+		find: "\t\t\t? `repeat(${fixed}, minmax(0, 1fr))`",
+		replace: "\t\t\t? `repeat(auto-fill, minmax(${MIN_COLUMN_PX}px, 1fr))`",
+		filter: "layout follows the column"
+	},
+	{
+		name: "the import writes the file as soon as it is picked, with nothing to confirm",
+		file: "lib/core/views.js",
+		find: "\t\t\tsetPending({ name: file.name, entries: parsed.entries, skippedCount: parsed.skipped ?? 0, plan: planFor(parsed.entries, includeDeleted) });",
+		replace: "\t\t\tsetPending(null);\n\t\t\tsetReport(await importEntries(store, parsed.entries, { includeDeleted, skipped: parsed.skipped ?? 0 }));",
+		filter: "transferImport"
+	},
+	{
+		name: "the confirmation writes the entries instead of the ones the user saw",
+		file: "lib/core/views.js",
+		find: "\t\t\tsetReport(await importEntries(store, pending.entries, { includeDeleted, skipped: pending.skippedCount }));",
+		replace: "\t\t\tsetReport(await importEntries(store, [], { includeDeleted, skipped: pending.skippedCount }));",
+		filter: "transferImport"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',

@@ -1618,6 +1618,67 @@ test("settings: the source list keeps only what can actually be fetched", () => 
 	assertEqual(normalizeSettings({}).packSources === normalizeSettings({}).packSources, false, "each read is its own array");
 });
 
+test("panel: the entry list's layout follows the column preference", () => {
+	// The list container carries the preference, and the sandbox has no layout engine — so what a check
+	// can prove is the STYLE the page asked for, which is the whole of the rule: `auto` fits as many
+	// columns as the panel is wide enough for, a number pins it, and `1` is the plain column the panel
+	// had before any of this existed.
+	const react = makeReactStub();
+	const bundle = loadBundle({ react });
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	const face = bundle.registered[index].inject();
+	const { createSettingsStore } = loadCore("settings.js");
+	const memory = new Map();
+	const settings = createSettingsStore({
+		storage: {
+			getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+			setItem: (key, value) => memory.set(key, String(value)),
+			removeItem: (key) => memory.delete(key)
+		}
+	});
+	const renderPanel = () => {
+		react.__beginRender();
+		return bundle.components[index]({ ...face, settings, t: (key) => key, setToast: () => {} });
+	};
+	const listOf = (tree) => {
+		const found = [];
+		const walk = (node) => {
+			if (node === null || node === undefined || typeof node !== "object") return;
+			if (Array.isArray(node)) {
+				for (const child of node) walk(child);
+				return;
+			}
+			if (typeof node.type === "function") {
+				walk(node.type(node.props));
+				return;
+			}
+			if (typeof node.props?.["data-term-columns"] === "string") found.push(node);
+			walk(node.props?.children);
+		};
+		walk(tree);
+		return found[0];
+	};
+
+	const auto = listOf(renderPanel());
+	assertEqual(auto?.props["data-term-columns"], "auto", "a fresh install lays the list out automatically");
+	assertEqual(auto?.props.style.display, "grid", "which is a grid rather than one column");
+	assert(String(auto?.props.style.gridTemplateColumns).includes("auto-fill"), "the grid fits as many columns as the panel allows");
+
+	settings.set("entryColumns", "2");
+	const two = listOf(renderPanel());
+	assertEqual([two?.props["data-term-columns"], two?.props.style.gridTemplateColumns], ["2", "repeat(2, minmax(0, 1fr))"], "a chosen count is pinned exactly");
+
+	settings.set("entryColumns", "1");
+	const one = listOf(renderPanel());
+	assertEqual(one?.props["data-term-columns"], "1", "and one column is still a choice");
+	assertEqual(one?.props.style.display, "grid", "expressed as a single-track grid, so the rule has one shape");
+
+	// A value the store has no branch for never reaches the page: `set` normalises, so the impossible
+	// count is turned into the default on the way in rather than being rendered as nothing.
+	settings.set("entryColumns", "9");
+	assertEqual(listOf(renderPanel())?.props["data-term-columns"], "auto", "an impossible count is normalised to the default by the store");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
@@ -1896,8 +1957,8 @@ test("panel: the settings page renders every preference and changes the store", 
 	// Eleven preferences, and the control each one's VALUE SHAPE calls for: two states get a switch,
 	// a few named choices get an option bar, and a number in a range gets a slider plus a box.
 	assertEqual(switches.length, 6, "six switches: collect, annotate, explain, paragraph, code names, Chinese terms");
-	assertEqual(bars.length, 3, "three option bars: language, depth, minimum length");
-	assertEqual(bars.map((bar) => bar.props.options.length), [3, 3, 5], "each bar shows every one of its values");
+	assertEqual(bars.length, 4, "four option bars: language, depth, entry columns, minimum length");
+	assertEqual(bars.map((bar) => bar.props.options.length), [3, 3, 4, 5], "each bar shows every one of its values");
 	assertEqual(fields.length, 2, "two delay fields: the hover entry delay and the hover exit delay");
 	assertEqual(
 		fields.map((field) => [field.props.min, field.props.max]),
@@ -1931,7 +1992,11 @@ test("panel: the settings page renders every preference and changes the store", 
 	const langBar = bars.find((bar) => bar.props.label === "explainLangName");
 	const depthBar = bars.find((bar) => bar.props.label === "explainDepthName");
 	const lengthBar = bars.find((bar) => bar.props.label === "collectMinLengthName");
-	assert(langBar !== undefined && depthBar !== undefined && lengthBar !== undefined, "all three option bars must be reachable by name");
+	const columnBar = bars.find((bar) => bar.props.label === "entryColumnsName");
+	assert(
+		langBar !== undefined && depthBar !== undefined && lengthBar !== undefined && columnBar !== undefined,
+		"all four option bars must be reachable by name"
+	);
 	assertEqual(langBar.props.options.map((option) => option.value), ["auto", "zh", "en"], "the language bar offers every language");
 	assertEqual(langBar.props.options.length, 3, "and offers one option per value");
 	langBar.props.onSelect("zh");
@@ -1940,6 +2005,11 @@ test("panel: the settings page renders every preference and changes the store", 
 	assertEqual(store.getSnapshot().explainDepth, "detailed", "the depth bar too");
 	lengthBar.props.onSelect(6);
 	assertEqual(store.getSnapshot().collectMinLength, 6, "and the length bar takes a number, which the cycling control could not");
+	// The layout is a preference like the rest: string values, so the panel can key on them, and "auto" is
+	// the default because a single column of dictionary rows is a very long strip to read.
+	assertEqual(columnBar.props.options.map((option) => option.value), ["auto", "1", "2", "3"], "the layout bar offers auto and a fixed count");
+	columnBar.props.onSelect("2");
+	assertEqual(store.getSnapshot().entryColumns, "2", "choosing a layout reaches the store");
 
 	// The entry list no longer renders any of them, and carries the entry to the page instead.
 	const index = bundle.registered.findIndex((options) => options.name === "main");
@@ -2704,11 +2774,24 @@ async function asyncChecks() {
 		const start = renderPage();
 		assert(optInBox(start) !== null, "the import half offers the opt-in for entries the user deleted");
 		assertEqual(reportedCounts(start), undefined, "and no report before anything was imported");
+
+		// Picking a file now STAGES it: the page says what is in the file and writes nothing until the
+		// user confirms. This is the moment the second decision finally has.
 		fileInput(start).props.onChange(pick());
+		await drainMicrotasks();
+		await drainMicrotasks();
+		const staged = renderPage();
+		assertEqual(find(staged, (node) => node.props?.["data-term-import-pending"] === "true").length, 1, "picking a file asks for confirmation instead of importing");
+		assertEqual(reportedCounts(staged), undefined, "and no report yet, because nothing was written");
+		assertEqual(face.store.list("", "all").map((entry) => entry.term), ["Quorum"], "the store is untouched while the file waits");
+		const confirm = find(staged, (node) => node.props?.label === "transferConfirm" && typeof node.props.onClick === "function")[0];
+		assert(confirm !== undefined, "the confirmation offers the press that does the write");
+		confirm.props.onClick();
 		await drainMicrotasks();
 		await drainMicrotasks();
 		const after = renderPage();
 		assertEqual(failures(after), [], "the import must not have been refused");
+		assertEqual(find(after, (node) => node.props?.["data-term-import-pending"] === "true").length, 0, "and the confirmation is gone once it has been answered");
 		assertEqual(reportedCounts(after), { imported: 1, existing: 1, deleted: 1, duplicates: 2 }, "every fate is counted");
 		assertEqual(face.store.list("", "all").map((entry) => entry.term).sort(), ["Idempotent", "Quorum"], "only the new entry was taken");
 		assertEqual(face.store.list("", "all").find((entry) => entry.term === "Quorum").definition.gloss, "本地解释", "the entry already here kept its own text, not the file's");
@@ -2716,10 +2799,28 @@ async function asyncChecks() {
 		assertEqual(face.store.list("", "deleted").map((entry) => entry.term), ["Entropy"], "and the entry the user deleted is still deleted");
 
 		// Ticked, the same file brings it back — and the report's "you deleted" is then a real zero
-		// rather than a number that quietly changed meaning.
+		// rather than a number that quietly changed meaning. The opt-in re-plans the PREVIEW too: the
+		// number the user is about to confirm has to be the number the opt-in produces.
 		optInBox(after).props.onChange();
 		const ticked = renderPage();
 		fileInput(ticked).props.onChange(pick());
+		await drainMicrotasks();
+		await drainMicrotasks();
+		const restaged = renderPage();
+		const stagedText = (() => {
+			const parts = [];
+			const gather = (node) => {
+				if (typeof node === "string" || typeof node === "number") parts.push(String(node));
+				else if (Array.isArray(node)) node.forEach(gather);
+				else if (node !== null && typeof node === "object") gather(node.props?.children);
+			};
+			gather(find(restaged, (node) => node.props?.["data-term-import-pending"] === "true")[0]);
+			return parts.join(" | ");
+		})();
+		assert(stagedText.includes("transferConfirmTitle"), `the preview names the file it read, saw ${stagedText}`);
+		assertEqual(reportedCounts(restaged), undefined, "and nothing is written until the second press");
+		const confirmTicked = find(restaged, (node) => node.props?.label === "transferConfirm" && typeof node.props.onClick === "function")[0];
+		confirmTicked.props.onClick();
 		await drainMicrotasks();
 		await drainMicrotasks();
 		const second = renderPage();
