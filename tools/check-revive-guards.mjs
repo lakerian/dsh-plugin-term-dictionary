@@ -413,6 +413,20 @@ const mutations = [
 		suite: "host"
 	},
 	{
+		name: "clearing every source silently brings the shipped one back",
+		file: "lib/core/settings.js",
+		find: "\t\tpackSources: value.packSources === undefined ? [...DEFAULT_SETTINGS.packSources] : readSources(value.packSources)",
+		replace: "\t\tpackSources: readSources(value.packSources).length === 0 ? [...DEFAULT_SETTINGS.packSources] : readSources(value.packSources)",
+		filter: "source list keeps"
+	},
+	{
+		name: "the packs page never asks its sources, so a fresh install shows nothing",
+		file: "lib/core/views.js",
+		find: "\t\tvoid refresh();",
+		replace: "\t\tvoid 0;",
+		filter: "packPage"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',

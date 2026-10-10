@@ -1590,7 +1590,7 @@ test("settings: the source list keeps only what can actually be fetched", () => 
 	// `pack.js`'s own `refuseUrl` — the same one the host applies before it fetches anything — so a
 	// stored list cannot hold a source the transport would later refuse, and the page cannot disagree
 	// with the host about what a usable source is.
-	const { normalizeSettings, MAX_SOURCES } = loadCore("settings.js");
+	const { normalizeSettings, MAX_SOURCES, DEFAULT_PACK_SOURCE } = loadCore("settings.js");
 	const normalized = normalizeSettings({
 		packSources: [
 			"https://cdn.jsdelivr.net/gh/a/b@main/index.json",
@@ -1605,8 +1605,12 @@ test("settings: the source list keeps only what can actually be fetched", () => 
 		]
 	});
 	assertEqual(normalized.packSources, ["https://cdn.jsdelivr.net/gh/a/b@main/index.json", "https://example.com/spaced.json"], "only https, trimmed and deduplicated");
-	assertEqual(normalizeSettings({}).packSources, [], "a record with no sources gets an empty list");
-	assertEqual(normalizeSettings({ packSources: "https://example.com/i.json" }).packSources, [], "a bare string is not a list");
+	// An absent key and an empty list are different statements: "never touched, use the shipped default"
+	// against "I removed them all". A store that conflated them would resurrect the default every time
+	// somebody cleared the list — which is what makes shipping a default possible at all.
+	assertEqual(normalizeSettings({}).packSources, [DEFAULT_PACK_SOURCE], "a record with no sources key gets the shipped default");
+	assertEqual(normalizeSettings({ packSources: [] }).packSources, [], "while an explicitly empty list stays empty");
+	assertEqual(normalizeSettings({ packSources: "https://example.com/i.json" }).packSources, [], "a bare string is not a list, and is not the default either");
 	const many = normalizeSettings({ packSources: Array.from({ length: 30 }, (unused, index) => `https://example.com/${index}.json`) });
 	assertEqual(many.packSources.length, MAX_SOURCES, "and the list is capped rather than unbounded");
 	// A fresh array each read: a snapshot is compared by identity, and a shared default array would let
@@ -3033,7 +3037,7 @@ async function asyncChecks() {
 			setItem: (key, value) => memory.set(key, String(value)),
 			removeItem: (key) => memory.delete(key)
 		};
-		const { createSettingsStore } = loadCore("settings.js");
+		const { createSettingsStore, DEFAULT_PACK_SOURCE } = loadCore("settings.js");
 		const settings = createSettingsStore({ storage });
 
 		const calls = [];
@@ -3094,12 +3098,28 @@ async function asyncChecks() {
 		};
 
 		// --- sharing
+		// --- what the page did before anything was pressed
+		//
+		// The shipped source is asked once, when the page first opens: a fresh install that showed a
+		// configured source and no packs would make 「刷新」 a step nobody can guess the purpose of. The
+		// calls are looked up BY KIND from here on, because this one now lands before any button press.
+		const of = (what) => calls.filter((call) => call.what === what);
+		// The first render, which is what the effect below hangs off: nothing was pressed.
+		const opening = render();
+		assertEqual([of("index").length, of("index")[0]?.url], [1, DEFAULT_PACK_SOURCE], "the page asks its own sources once on first open");
+		assertEqual(find(opening, (node) => node.props?.["data-term-source"] === DEFAULT_PACK_SOURCE).length, 1, "and lists that source");
+		assert(text(opening).includes("packBuiltInSource"), "marked as the one that shipped with the plugin");
+		// Asking twice would mean the effect does not hold its own latch; it must not re-ask on every
+		// render, and pressing refresh is the only way to ask again.
+		render();
+		assertEqual(of("index").length, 1, "and does not ask again on the next render");
+
 		button(render(), "packMakeCode").props.onClick();
 		await drainMicrotasks();
 		await drainMicrotasks();
-		assertEqual(calls[0].what, "build", "the share button asks the host to build");
-		assertEqual(calls[0].input.code, true, "and to encode a code with it");
-		assertEqual(calls[0].input.scope, "all", "from the whole dictionary by default");
+		assertEqual(of("build").length, 1, "the share button asks the host to build");
+		assertEqual(of("build")[0].input.code, true, "and to encode a code with it");
+		assertEqual(of("build")[0].input.scope, "all", "from the whole dictionary by default");
 		const built = render();
 		assertEqual(find(built, (node) => node.props?.["data-term-pack-code"] === "true")[0].props.value, "dshpack1:STUB", "the code appears for copying");
 		assert(text(built).includes("packDigest"), "with the digest and size, so the artifact is identifiable");
@@ -3110,7 +3130,7 @@ async function asyncChecks() {
 		button(render(), "packRead").props.onClick();
 		await drainMicrotasks();
 		await drainMicrotasks();
-		assertEqual([calls[1].what, calls[1].value], ["decode", "dshpack1:FROM-SOMEONE"], "reading a code asks the host to decode exactly what was pasted");
+		assertEqual([of("decode").length, of("decode")[0].value], [1, "dshpack1:FROM-SOMEONE"], "reading a code asks the host to decode exactly what was pasted");
 		const preview = render();
 		assertEqual(find(preview, (node) => node.props?.["data-term-pack-preview"] === "true").length, 1, "and the pack is previewed before anything is imported");
 		assert(text(preview).includes("别人的包"), "naming what arrived");
@@ -3124,7 +3144,7 @@ async function asyncChecks() {
 		const sourceField = find(render(), (node) => node.props?.label === "packAddSourceLabel" && typeof node.props.onChange === "function")[0];
 		sourceField.props.onChange("http://insecure.example/index.json");
 		button(render(), "packAddSource").props.onClick();
-		assertEqual(settings.getSnapshot().packSources, [], "an http source is refused");
+		assertEqual(settings.getSnapshot().packSources, [DEFAULT_PACK_SOURCE], "an http source is refused, leaving the shipped one alone");
 		const draftNow = find(render(), (node) => node.props?.label === "packAddSourceLabel")[0];
 		assert(text(render()).includes("packError_not-https"), `and the page says why, saw ${JSON.stringify(text(render()))} draft=${JSON.stringify(draftNow?.props?.value)}`);
 		// The refusal is `not-https` rather than `bad-url`: the sandbox has `URL` now, so the page's own
@@ -3132,20 +3152,24 @@ async function asyncChecks() {
 		const field2 = find(render(), (node) => node.props?.label === "packAddSourceLabel" && typeof node.props.onChange === "function")[0];
 		field2.props.onChange("https://example.com/index.json");
 		button(render(), "packAddSource").props.onClick();
-		assertEqual(settings.getSnapshot().packSources, ["https://example.com/index.json"], "an https source is kept in the settings");
+		assertEqual(settings.getSnapshot().packSources, [DEFAULT_PACK_SOURCE, "https://example.com/index.json"], "an https source is added to the settings, after the shipped one");
 
 		// --- refresh, preview and import one pack from the source
+		const indexed = of("index").length;
 		button(render(), "packRefresh").props.onClick();
 		await drainMicrotasks();
 		await drainMicrotasks();
-		assertEqual(calls[calls.length - 1].what, "index", "refreshing asks the source");
+		assertEqual(of("index").length, indexed + 2, "refreshing asks every source, including the one just added");
 		const listed = render();
-		assertEqual(find(listed, (node) => typeof node.props?.["data-term-pack"] === "string").length, 1, "and the pack it offers is listed");
+		// Two sources answered, and this stub lists the same pack at both — so two rows, keyed by
+		// source AND id. Deliberate: the same pack id from two places is not necessarily the same file,
+		// and collapsing them would hide one of the two checksums.
+		assertEqual(find(listed, (node) => typeof node.props?.["data-term-pack"] === "string").length, 2, "and every source's packs are listed");
 		button(render(), "packPreview").props.onClick();
 		await drainMicrotasks();
 		await drainMicrotasks();
-		assertEqual(calls[calls.length - 1].what, "fetch", "previewing fetches that pack");
-		assertEqual(calls[calls.length - 1].sha256, "b".repeat(64), "carrying the digest the index promised");
+		assertEqual(of("fetch").length, 1, "previewing fetches that pack");
+		assertEqual(of("fetch")[0].sha256, "b".repeat(64), "carrying the digest the index promised");
 		assertEqual(find(render(), (node) => node.props?.["data-term-pack-preview"] === "true").length, 1, "and it is previewed like a code is");
 	});
 
