@@ -422,7 +422,7 @@ const mutations = [
 	{
 		name: "the packs page never asks its sources, so a fresh install shows nothing",
 		file: "lib/core/views.js",
-		find: "\t\tvoid refresh();",
+		find: "\t\tvoid refresh().catch(() => say(t(\"packError_unknown\")));",
 		replace: "\t\tvoid 0;",
 		filter: "packPage"
 	},
@@ -622,10 +622,10 @@ const mutations = [
 		filter: "renaming, moving and deleting a group"
 	},
 	{
-		name: "the caret's own position is ignored, so a line's left margin counts as its first term",
+		name: "the term's own box is ignored, so a line's margin counts as its first (or last) term",
 		file: "lib/core/hover.js",
-		find: "\t\tif (!caretIsAt(x, caret)) return null;",
-		replace: "",
+		find: "\t\t\tif (rects !== null && rects.length > 0) {",
+		replace: "\t\t\tif (false) {",
 		filter: "the left margin of a line"
 	},
 	{
@@ -650,10 +650,10 @@ const mutations = [
 		filter: "props its feedback half sends with"
 	},
 	{
-		name: "an unmeasurable caret refuses instead of being trusted",
+		name: "an unmeasurable box refuses instead of being trusted",
 		file: "lib/core/hover.js",
-		find: '\t\tif (rect === null || (rect.left === 0 && rect.top === 0 && rect.width === 0 && rect.height === 0)) return true;',
-		replace: "\t\tif (rect === null || rect.left === 0) return false;",
+		find: "\t\t\t\tif (measured && !inside) return null;",
+		replace: "\t\t\t\tif (!inside) return null;",
 		filter: "the left margin of a line"
 	},
 	{

@@ -3944,7 +3944,9 @@ async function asyncChecks() {
 		const text = { nodeType: 3, nodeValue: "Quorum decides.", parentElement: null, childNodes: [] };
 		const onTerm = { node: text, start: 0, end: 6, term: "Quorum", key: "quorum", id: "" };
 
-		const make = (rect) => {
+		// `rect` is the caret the point resolves to; `box` is the TERM's own rectangle, which is what the gate
+		// reads. They are different facts, and a fixture that conflates them would pass for the wrong reason.
+		const make = (rect, box) => {
 			const listeners = {};
 			// A stand-in for the conversation region: it answers `closest` for any selector, which is how the
 			// existing checks model "the pointer is inside the region". Without it the click never reaches the
@@ -3963,7 +3965,10 @@ async function asyncChecks() {
 				createRange: () => ({
 					setStart: () => {},
 					setEnd: () => {},
-					getBoundingClientRect: () => ({ left: 0, top: 0, right: 10, bottom: 10, width: 10, height: 10 })
+					getBoundingClientRect: () => box,
+					// The gate asks for client rects; a fixture without them is "unmeasurable", and the gate
+					// trusts that — so the missing stub would have made every margin assertion pass.
+					getClientRects: () => [box]
 				})
 			};
 			const activated = [];
@@ -3981,17 +3986,28 @@ async function asyncChecks() {
 			return { activated, click };
 		};
 
-		// The text starts at x=300; the pointer is 280px to its left.
-		const margin = make({ left: 300, top: 32, width: 0, height: 16 });
+		// A term that BEGINS its line: its box runs 300..364, and the caret clamps to offset 0 there.
+		const margin = make({ left: 300, top: 32, width: 0, height: 16 }, { left: 300, top: 32, right: 364, bottom: 48, width: 64, height: 16 });
 		margin.click(20);
-		assertEqual(margin.activated, [], "a point far to the left of the line is not on the term that starts it");
+		assertEqual(margin.activated, [], "a point far to the left is not on the term that begins the line");
 		// And the gesture still works where the text actually is — the guard must not disable what it guards.
 		margin.click(304);
 		assertEqual(margin.activated, ["Quorum"], "while a point on the first character still opens it");
-		// A browser that cannot measure the caret is trusted rather than having every hover refused.
-		const unmeasurable = make({ left: 0, top: 0, width: 0, height: 0 });
+
+		// A term that ENDS its line: the caret clamps to the END offset there, which is INSIDE the term — the
+		// side the earlier version of this guard missed, reported as "a term at the right edge opens from far
+		// right". Same clamped caret, opposite margin.
+		const far = make({ left: 500, top: 32, width: 0, height: 16 }, { left: 500, top: 32, right: 516, bottom: 48, width: 16, height: 16 });
+		far.click(900);
+		assertEqual(far.activated, [], "a point far to the right is not on the term that ends the line");
+		far.click(508);
+		assertEqual(far.activated, ["Quorum"], "while a point on it still opens it");
+
+		// Nothing measurable is trusted rather than refused: a browser that cannot answer costs the guard, not
+		// the feature.
+		const unmeasurable = make({ left: 0, top: 0, width: 0, height: 0 }, { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 });
 		unmeasurable.click(20);
-		assertEqual(unmeasurable.activated, ["Quorum"], "and an unmeasurable caret is not treated as a refusal");
+		assertEqual(unmeasurable.activated, ["Quorum"], "and an unmeasurable box is not treated as a refusal");
 	});
 
 	await asyncCheck("panel: 撤回 in the deleted view revives the entry the row names, and says so", "revivePanel", async () => {
