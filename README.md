@@ -682,7 +682,8 @@ dsh plugin --profile <你的 profile> add dsh-plugin-term-dictionary
    能证明：实测 rev 从 `16ff8ae5c296` 变为 `2d9aa8179993`，取回的正文与磁盘产物逐字节相同，
    只差 host 追加的一行 `sourceMappingURL`）。**已经打开的页面是否换到新字节，取决于它启动时拿到的那份
    启动图**：刷新一次即可；若刷新后仍是旧行为，说明启动图还指着旧 rev，重启一次就对了。
-   所以 **改样式/交互 → 先刷新；改 host 半边 → 重启应用**。
+   所以 **改样式/交互 → 重启 Host**（或跑 `dev:web` 让热替换生效）。**刷新页面不会换 bundle**：模块 URL
+   按 revision 生成、且被 immutable 缓存，重问同一个地址只会拿到同一份旧字节。改 host 半边同样以重启为准。
 
 怎么确认真的活着（两种都实测过）：
 
