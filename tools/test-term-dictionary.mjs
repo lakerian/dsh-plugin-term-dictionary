@@ -3980,8 +3980,8 @@ async function asyncChecks() {
 				onActivate: (segment) => activated.push(segment.term)
 			});
 			layer.attach();
-			const click = (x) => {
-				for (const handler of listeners.click ?? []) handler({ button: 0, clientX: x, clientY: 40, target });
+			const click = (x, at = 40) => {
+				for (const handler of listeners.click ?? []) handler({ button: 0, clientX: x, clientY: at, target });
 			};
 			return { activated, click };
 		};
@@ -4002,6 +4002,20 @@ async function asyncChecks() {
 		assertEqual(far.activated, [], "a point far to the right is not on the term that ends the line");
 		far.click(508);
 		assertEqual(far.activated, ["Quorum"], "while a point on it still opens it");
+
+		// And nothing off the LINE. Reported as a column of pixels that opened a term from above and below it
+		// across a whole table: a pointer in the leading, or in a table cell's padding, still resolves to the
+		// same text offset, so the segment lookup says yes and only the box can refuse it. The box is 32..48,
+		// so 300 is a long way below it and 28 is inside the leading.
+		const line = make({ left: 300, top: 32, width: 0, height: 16 }, { left: 300, top: 32, right: 364, bottom: 48, width: 64, height: 16 });
+		line.click(310, 300);
+		assertEqual(line.activated, [], "a point far below the line is not on the term");
+		line.click(310, -40);
+		assertEqual(line.activated, [], "nor far above it");
+		line.click(310, 28);
+		assertEqual(line.activated, ["Quorum"], "while a point slightly high of the letters is still on it");
+		line.click(310, 52);
+		assertEqual(line.activated, ["Quorum", "Quorum"], "and slightly low of them is too");
 
 		// Nothing measurable is trusted rather than refused: a browser that cannot answer costs the guard, not
 		// the feature.

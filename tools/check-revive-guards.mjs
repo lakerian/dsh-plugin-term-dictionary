@@ -622,6 +622,13 @@ const mutations = [
 		filter: "renaming, moving and deleting a group"
 	},
 	{
+		name: "the vertical band is unbounded, so a term opens from above and below it",
+		file: "lib/core/hover.js",
+		find: "\t\t\t\t\tconst slackY = Math.max(MIN_VERTICAL_SLACK_PX, rect.height * VERTICAL_SLACK_RATIO);",
+		replace: "\t\t\t\t\tconst slackY = 100000;",
+		filter: "the left margin of a line"
+	},
+	{
 		name: "the term's own box is ignored, so a line's margin counts as its first (or last) term",
 		file: "lib/core/hover.js",
 		find: "\t\t\tif (rects !== null && rects.length > 0) {",
