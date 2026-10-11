@@ -718,7 +718,11 @@ node tools/verify-plugin-row.mjs dsh-plugin-term-dictionary
 | `lib/core/dictionary.js` | 词典文档操作与两种存储后端 |
 | `lib/core/store.js` | 页面侧可订阅状态与持久化编排 |
 | `lib/core/settings.js` | 三个功能开关（独立 `localStorage` 键，不进合并文档） |
-| `lib/core/interact.js` | 对话区交互：自动收录、点击未收录词、选中建条 |
+| `lib/core/interact.js` | 对话区交互：自动收录、点击**未收录**词、选中建条 |
+| `lib/core/hover.js` | 悬停卡片与**标记词**的点击命中（caret 查表，不碰几何） |
+| `lib/core/selection.js` | 选区守卫：结束一次选中的那一下不算点击 |
+| `lib/core/pack.js` | 词条包与源索引的形状：构建、解析、URL 拒绝规则 |
+| `lib/core/transfer.js` | 导入 / 导出 / 反馈报告：解析、预演（dry run）、包与文件夹读取 |
 | `lib/core/highlight.js` | 标注层：把已收录的词算成 `Range` 并交给 CSS Custom Highlight |
 | `lib/core/bus.js` | 会话区 → 面板的单槽命令总线（建条 / 定位词条） |
 | `lib/core/views.js` · `overlay.js` · `styles.js` | 面板、气泡、样式 |
