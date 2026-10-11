@@ -2145,6 +2145,33 @@ test("dictionary: renaming, moving and deleting a group are the same decisions a
 	assertEqual(groupsIn(deleted.state.entries, "").map((each) => each.name), ["ops"], "a group disappears when the last entry in it does, which is the rule that made it appear");
 });
 
+test("copy: every error code the plugin can show a reader has copy behind it", () => {
+	// The completeness check that already existed compares the two LOCALES with each other, and both were
+	// missing the same six keys — so it was green while every import reported a row of raw keys. This is the
+	// other half: the CODES the code produces, resolved against the real tables rather than against a stub `t`.
+	//
+	// The harness's `t` is the identity function, which is why the assertion further down that looks for
+	// "transferImported" could not tell a missing key from a present one. Here the tables are the subject.
+	const { zh, en } = loadCore("copy.js");
+	const has = (key) => Object.prototype.hasOwnProperty.call(zh, key) && Object.prototype.hasOwnProperty.call(en, key);
+
+	const { IMPORT_ERRORS } = loadCore("transfer.js");
+	for (const code of IMPORT_ERRORS) {
+		assert(has(`transferError_${code}`), `a parse refusal has a sentence: ${code}`);
+	}
+	// The report line's four counts, the toast an export ends with, and the scope label.
+	for (const key of ["transferImported", "transferExisting", "transferSkippedDeleted", "transferDuplicates", "transferExported", "transferScope", "transferFolderSkippedPair"]) {
+		assert(has(key), `a key the import/export page asks for exists: ${key}`);
+	}
+	// The refusals our own parsers produce, plus the codes the host's failure family is folded into.
+	for (const code of ["not-an-index", "no-packs", "no-usable-packs", "too-large", "unreachable", "unknown", "not-json", "no-entries", "no-usable-entries", "not-a-pack", "unsupported-version", "too-many", "empty", "empty-scope", "no-url", "url-too-long", "bad-url", "not-https", "credentials-in-url", "not-a-code", "empty-code", "corrupt", "unavailable"]) {
+		assert(has(`packError_${code}`), `a source failure has a sentence: ${code}`);
+	}
+	// The host's transport family must never reach `t()` as it arrives — a status is unbounded and `empty`
+	// means something else there — so it is folded first, and this is what makes the set above closed.
+	assert(has("packError_unreachable") && !has("packError_http-404"), "a status is folded rather than spelled out");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its

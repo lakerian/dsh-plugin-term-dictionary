@@ -629,6 +629,20 @@ const mutations = [
 		filter: "the left margin of a line"
 	},
 	{
+		name: "a parse refusal loses its sentence, so the reader is shown the code",
+		file: "lib/core/copy.js",
+		find: '\t"transferError_not-json": "这不是 JSON 文件。",\n',
+		replace: "",
+		filter: "every error code the plugin"
+	},
+	{
+		name: "the code a transport failure is folded into has no sentence either",
+		file: "lib/core/copy.js",
+		find: '\t"packError_unreachable": "取不到（网络、超时或证书问题）",\n',
+		replace: "",
+		filter: "every error code the plugin"
+	},
+	{
 		name: "an unmeasurable caret refuses instead of being trusted",
 		file: "lib/core/hover.js",
 		find: '\t\tif (rect === null || (rect.left === 0 && rect.top === 0 && rect.width === 0 && rect.height === 0)) return true;',
