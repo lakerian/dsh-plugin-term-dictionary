@@ -2222,6 +2222,27 @@ test("panel: the import page is given the props its feedback half sends with", (
 	assertEqual(typeof page.props.recordFeedback, "function", "along with the way to record a remark");
 });
 
+test("copy: every key the browser half asks for by name exists in both locales", () => {
+	// The hole the copy audit found, and the one I fell into while fixing it: the completeness check compares
+	// the two LOCALES with each other, so it is blind to a key the CODE asks for and NEITHER locale has. That
+	// state shows a reader a raw key (`generateNoModel`), and a green suite says nothing about it.
+	//
+	// Scanned from the sources rather than the built bundle, so a module added tomorrow is covered without
+	// anyone remembering to add it here.
+	const { zh, en } = loadCore("copy.js");
+	const has = (key) => Object.prototype.hasOwnProperty.call(zh, key) && Object.prototype.hasOwnProperty.call(en, key);
+	const asked = new Map();
+	for (const name of readdirSync(join(pluginDir, "lib", "core")).filter((entry) => entry.endsWith(".js"))) {
+		const source = readFileSync(join(pluginDir, "lib", "core", name), "utf8");
+		for (const match of source.matchAll(/\bt\(\s*"([^"\\]+)"/g)) {
+			if (!asked.has(match[1])) asked.set(match[1], name);
+		}
+	}
+	assert(asked.size > 50, `the scan has to find the calls at all, found ${asked.size}`);
+	const missing = [...asked.entries()].filter(([key]) => !has(key)).map(([key, where]) => `${key} (${where})`);
+	assertEqual(missing, [], "every key asked for by name has copy in both languages");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
@@ -3283,8 +3304,18 @@ async function asyncChecks() {
 		};
 		/** The counts the page reported, or undefined while it has not reported anything yet. */
 		const reportedCounts = (tree) => {
-			const line = find(tree, (node) => typeof node.props?.children === "string" && node.props.children.startsWith("transferReport"))[0];
-			return line === undefined ? undefined : JSON.parse(line.props.children.slice("transferReport|".length));
+			// The report is the key-based form now (`transferImported|{"count":1} · …`), which is what
+			// `importReportText` produces so the two pages that import cannot describe it differently. Read
+			// the numbers out of whichever parts are present: a count of zero is left out of the line, which
+			// is why this starts from zero rather than from the parts it finds.
+			const line = find(tree, (node) => typeof node.props?.children === "string" && node.props.children.includes("transferImported"))[0];
+			if (line === undefined) return undefined;
+			const counts = { imported: 0, existing: 0, deleted: 0, duplicates: 0 };
+			const named = { transferImported: "imported", transferExisting: "existing", transferSkippedDeleted: "deleted", transferDuplicates: "duplicates" };
+			for (const match of String(line.props.children).matchAll(/(transferImported|transferExisting|transferSkippedDeleted|transferDuplicates)\|\{"count":(\d+)\}/g)) {
+				counts[named[match[1]]] = Number(match[2]);
+			}
+			return counts;
 		};
 		/** Any failure line the page showed, so a refused import cannot read as a silent one. */
 		const failures = (tree) => find(tree, (node) => typeof node.props?.children === "string" && node.props.children.startsWith("transferFailed")).map((node) => node.props.children);
