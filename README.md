@@ -19,7 +19,7 @@
 
 | 手势 | 行为 |
 |---|---|
-| **鼠标靠近**（指针停在词上 110ms，设置页可调 0–200ms） | 在指针旁浮出**简短解释**：术语、中文译名、最多三行的解释，以及一行提示。气泡不接收指针事件，不会挡住下面的文字。 |
+| **鼠标靠近**（指针停在词上 110ms，设置页可调 0–200ms） | 在指针旁浮出**简短解释**：术语、中文译名、解释（卡片最高约半屏，超出滚动），以及一行提示。气泡不接收指针事件，不会挡住下面的文字。 |
 | **点击** | **进入词典对应词条**：切换到词典面板并把那条词条滚动到视野中，短暂高亮。 |
 | **选中词句** | 出现「添加词条」按钮，点击后打开编辑器并预填。 |
 
@@ -89,7 +89,7 @@
 
 ## 解释从哪里来
 
-- **内置词库**：约 860 条英文技术词与 160 条中文行业词，直接给出中文译名、领域和一句解释。
+- **内置词库**：约 860 条英文技术词与 240 条中文行业词，直接给出中文译名、领域和一句解释。
 - **模型生成**：点「用模型生成解释」时，host 半侧调用当前 profile 的 `llm` 服务，
   要求模型返回一个 JSON 对象，再逐字段校验后写入词典。没有可用模型时，界面提示手动填写。
 
@@ -166,7 +166,7 @@ background: "var(--dsw-alias-brand-primary, #4d6bfe)",
 
 ## 代码块不参与收录，也不参与标注
 
-`SKIP_SELECTOR`（`pre, code, a, [contenteditable=true], [data-term-dictionary]`）过去只用在
+`SKIP_SELECTOR`（`pre, code, a, [data-lexical-editor], [contenteditable=true], [data-term-dictionary]`）过去只用在
 **点击 / 悬停 / 选中**三条路径上，**采集器没有用它**——于是它扫描了 `readRegion` 产出的每一个块，
 而转录里的代码块和工具输出也是块。结果是一次会话就把 `Invoke-WebRequest`、`StatusCode`、
 `StartTime`、`data-chat-flow-key` 之类 **25 个 shell/工具输出来标识符**收进了词典，
@@ -202,7 +202,7 @@ background: "var(--dsw-alias-brand-primary, #4d6bfe)",
 | **行内代码 / 代码块** | **悬停解释 + 点击进词条** | **什么都不做** |
 | 链接 / 输入区 / 插件自己的 UI | 不介入 | 不介入 |
 
-选择器因此拆成两个：`BLOCKED_SELECTOR`（链接、编辑器、插件 UI——永不介入）与
+选择器因此分成三层：`BLOCKED_SELECTOR`（链接、编辑器、插件 UI——永不介入）与
 `DATA_SELECTOR`（`pre, code`——**只**禁掉建条那条路）。代码里的词仍然进不了词典
 （`collect: an uncollected identifier inside inline code never offers to create`），
 但已经收进来的词在任何地方都能读、都能跳（`click: a collected term inside inline code is explained, not refused`）。
@@ -235,9 +235,9 @@ background: "var(--dsw-alias-brand-primary, #4d6bfe)",
 所以记录里多了一个字段 **`pinnedAt`**，仅在调用方明确给出 `pinned` 时盖章；合并按它比较，
 并对时间戳取 `max`，**结果与合并顺序无关**（两边都会跑这个函数，必须收敛）。
 
-## 三个功能开关
+## 三个功能开关（在设置页上）
 
-面板搜索框下方三个开关，状态就写在按钮上（`role="switch"` + `aria-checked`）：
+设置页最上面的三个开关，状态就写在按钮上（`role="switch"` + `aria-checked`）：
 
 | 开关 | 关掉之后 |
 |---|---|
@@ -353,7 +353,7 @@ Quorum（多数派确认）
 
 三条路（面板行、标记词、未收录词）现在问的是同一个函数，所以这类"补了一条路、漏了另一条"的差异不会再发生——`interact.js` 的未收录词那条从写下起就有这个守卫，而 `hover.js` 的标记词那条是后来搬进来的，**漏了**，你踩到的就是它。
 
-## 词条包与分享码（尚未接上界面）
+## 词条包与分享码
 
 一个**词条包（pack）**是一份可以递给别人的词典：某个领域的术语表、一个团队的黑话、某类项目的词汇。
 
@@ -660,7 +660,7 @@ TypeError: Cannot read properties of undefined (reading 'validate')
 dsh plugin --profile <你的 profile> add dsh-plugin-term-dictionary
 ```
 
-装完刷新一次页面即可（host 半边与浏览器半边都会在运行中的进程里生效）。包不带任何 npm 依赖，
+装完重启 Host 即可（host 半边与浏览器半边都会在运行中的进程里生效）。包不带任何 npm 依赖，
 也不需要执行构建脚本。
 
 ### 开发时：`link:` 安装与何时重启
@@ -708,7 +708,7 @@ node tools/verify-plugin-row.mjs dsh-plugin-term-dictionary
 | `lib/core/dictionary.js` | 词典文档操作与两种存储后端 |
 | `lib/core/store.js` | 页面侧可订阅状态与持久化编排 |
 | `lib/core/settings.js` | 三个功能开关（独立 `localStorage` 键，不进合并文档） |
-| `lib/core/interact.js` | 对话区交互：自动收录、点击命中、悬停解释、选中建条 |
+| `lib/core/interact.js` | 对话区交互：自动收录、点击未收录词、选中建条 |
 | `lib/core/highlight.js` | 标注层：把已收录的词算成 `Range` 并交给 CSS Custom Highlight |
 | `lib/core/bus.js` | 会话区 → 面板的单槽命令总线（建条 / 定位词条） |
 | `lib/core/views.js` · `overlay.js` · `styles.js` | 面板、气泡、样式 |
@@ -734,11 +734,11 @@ node tools/verify-plugin-row.mjs dsh-plugin-term-dictionary
 ```powershell
 node tools/build-client.mjs          # 重新生成 lib/client.js
 node tools/build-client.mjs --check  # 校验产物是否最新
-node tools/test-term-dictionary.mjs  # 核心、词典、检测器、settings、bundle、清单、命令总线、主题令牌、模型路由、导入导出页（91 项）
+node tools/test-term-dictionary.mjs  # 核心、词典、检测器、settings、bundle、清单、命令总线、主题令牌、模型路由、导入导出页（120 项）
 node tools/test-interaction.mjs      # 点击 / 悬停 / 选中 / 行内代码 / 自动收录 / 代码块 / 开关 / 预算 / 命中阶段 / 标注（55 项）
-node tools/test-host-routes.mjs      # host 半边：路由、状态序列化、解释请求的形状（15 项）
+node tools/test-host-routes.mjs      # host 半边：路由、状态序列化、解释请求的形状（29 项）
 node tools/check-pointer-guards.mjs  # 19 个变异：把每条指针链的断言逐条改坏，看对应守卫是否真的变红
-node tools/check-revive-guards.mjs   # 16 个变异：撤回 / 已删除视图 / 导入选项 / 控制台报告那几组守卫
+node tools/check-revive-guards.mjs   # 82 个变异：撤回 / 已删除视图 / 导入选项 / 控制台报告那几组守卫
 node tools/check-display-meta.mjs    # 宿主读到的名称/简介/图标（含 `exports` 与 `en` 回退层）
 node tools/check-release-ready.mjs   # 能不能发布：清单字段 + 真的打包 + 装进干净目录再 import
 node tools/verify-plugin-row.mjs dsh-plugin-term-dictionary "术语词典"   # 运行中的 host 是否在提供本插件的 client 行
