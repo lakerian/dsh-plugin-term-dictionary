@@ -599,6 +599,10 @@ const offset = exact === null || live !== stale ? hit.offset : exact;   // 两�
   自动检测就能撤销用户的删除。授权复活的是**来源**（`source`，本来就在网线上、上盘，不会像
   临时标记一样丢）：`user`（用户在编辑器里写的）和 `llm`（用户让模型解释的）。
   `glossary` / `heuristic` / `auto` 都只是插件自己注意到了这个词，不能复活任何东西。
+- **一次有名字的恢复先于来源判定**：`restoreEntry`（导入撤回、以及「已删除」里的逐条撤回走的都是它）
+  记下 `restoredAt`，并**重新封存文档**——墓碑与它的 key 一起消失，而不是「在一次比较里被否决」。
+  被否决只意味着「这次没赢」，之后任何一次读到那块墓碑的合并都能把删除放回去；**撤回是让文档不再声称它被删过**。
+  （`reviveEntry` 是更窄的一条路，见「已删除」一节。）
 - **重新观察（sighting）永远不复活**：它不推进 `updatedAt`；对已删除术语的观察直接
   **不写入**（连计数都不加），因为墓碑本身就是那道闸。
 - **编辑器里的保存一定复活**：用户正在为这个词条输入解释。复活时间戳取
@@ -620,6 +624,11 @@ const offset = exact === null || live !== stale ? hit.offset : exact;   // 两�
 | GET | `/dsh-term-dictionary/state` | 读取整份词典（含数据目录与模型可用性） |
 | POST | `/dsh-term-dictionary/entries` | `replace` / `record` / `update` / `remove` |
 | POST | `/dsh-term-dictionary/explain` | 调用模型生成一条解释并入库 |
+| GET | `/dsh-term-dictionary/` | 与 `/state` 同义（少打几个字） |
+| POST | `/dsh-term-dictionary/feedback` | 把一条反馈送进宿主的反馈通道（**不带**任何对话原文） |
+| POST | `/dsh-term-dictionary/pack` | `build`（导出词条包）或 `decode`（解分享码） |
+| GET | `/dsh-term-dictionary/source/index` | 取回一个源索引（https-only、有缓存与超时） |
+| GET | `/dsh-term-dictionary/source/pack` | 取回一个包，并按索引承诺的 sha256 校验 |
 
 ## 配置
 
