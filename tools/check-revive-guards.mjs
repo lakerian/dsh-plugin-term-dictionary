@@ -643,6 +643,13 @@ const mutations = [
 		filter: "every error code the plugin"
 	},
 	{
+		name: "the panel stops forwarding the props the import page's feedback half sends with",
+		file: "lib/core/views.js",
+		find: "\t\t\t\tsessionId: props.sessionId,\n",
+		replace: "",
+		filter: "props its feedback half sends with"
+	},
+	{
 		name: "an unmeasurable caret refuses instead of being trusted",
 		file: "lib/core/hover.js",
 		find: '\t\tif (rect === null || (rect.left === 0 && rect.top === 0 && rect.width === 0 && rect.height === 0)) return true;',

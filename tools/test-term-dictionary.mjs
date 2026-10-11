@@ -2172,6 +2172,56 @@ test("copy: every error code the plugin can show a reader has copy behind it", (
 	assert(has("packError_unreachable") && !has("packError_http-404"), "a status is folded rather than spelled out");
 });
 
+test("panel: the import page is given the props its feedback half sends with", () => {
+	// The feedback button could only ever report 「先回对话里点一下词条再回来」, however well the route, the api and
+	// the host worked: the panel RECEIVED `sessionId` and `recordFeedback` from the shell and never passed them
+	// on. The suite could not see it because its own check renders the transfer page directly, with both props.
+	const react = makeReactStub();
+	const bundle = loadBundle({ react });
+	const index = bundle.registered.findIndex((options) => options.name === "main");
+	const face = bundle.registered[index].inject();
+	const { createSettingsStore } = loadCore("settings.js");
+	const settings = createSettingsStore({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } });
+	const props = {
+		...face,
+		settings,
+		t: (key) => key,
+		setToast: () => {},
+		sessionId: "session-1",
+		recordFeedback: async () => ({ ok: true })
+	};
+	const open = () => {
+		react.__beginRender();
+		return bundle.components[index](props);
+	};
+	const walk = (node, visit) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walk(child, visit);
+			return;
+		}
+		visit(node);
+		if (typeof node.type === "function") walk(node.type(node.props), visit);
+		else walk(node.props?.children, visit);
+	};
+	const find = (tree, match) => {
+		const found = [];
+		walk(tree, (node) => {
+			if (match(node)) found.push(node);
+		});
+		return found;
+	};
+
+	// Open the import/export page the way a reader does: the header button.
+	const opener = find(open(), (node) => node.type === "button" && typeof node.props?.onClick === "function" && JSON.stringify(node.props.children).includes("transferTitle"))[0];
+	assert(opener !== undefined, "the header offers the import / export page");
+	opener.props.onClick();
+	const page = find(open(), (node) => typeof node.type === "function" && node.props?.onImported !== undefined && node.props?.store !== undefined)[0];
+	assert(page !== undefined, "the panel renders the import page");
+	assertEqual(page.props.sessionId, "session-1", "and hands it the session id its feedback half needs");
+	assertEqual(typeof page.props.recordFeedback, "function", "along with the way to record a remark");
+});
+
 test("style: the notice that covers the composer does not eat clicks", () => {
 	// The toast is bottom-centre with the plugin's highest z-index — which is where the composer is —
 	// and it lives for six seconds. Without `pointer-events: none` it swallowed every click inside its
