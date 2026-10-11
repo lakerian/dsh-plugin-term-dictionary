@@ -2,6 +2,18 @@
 
 这个目录里放**可以分享出去的词条包**，以及由它们生成的 `index.json`。它是仓库内容，不是 npm 包内容（`package.json` 的 `files` 白名单里没有它，所以不会随插件发布出去）。
 
+## 目录里现在有什么
+
+| 文件 | 条数 | 用途 |
+|---|---|---|
+| `term-pack-包测试.json` | 20 | 最早的测试包 |
+| `term-pack-test-distributed.json` | 12 | 分布式系统术语：导入、搜索、分类、批量选择 |
+| `term-pack-test-network.json` | 8 | 网络术语：按分类导出后再导入 |
+| `term-pack-test-revive.json` | 3 | **专测「导入我删除过的词条」**：先删掉「墓碑探针」，再导入这个包把它带回来 |
+| `index.json` | — | 上面四个包的索引（由下面的脚本生成，不要手改） |
+
+测试步骤、以及导入 / 撤回删除 / 源这三条路的期望结果，写在 [`../test-fixtures/README.md`](../test-fixtures/README.md)。
+
 ## 怎么发一个包
 
 1. 打开插件的「词条包」页 →「生成文件」→ 下载 `term-pack-<id>.json`；
