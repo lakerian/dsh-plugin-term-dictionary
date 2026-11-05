@@ -105,6 +105,14 @@ function loadBundle(options = {}) {
 	};
 	const storage = options.storage ?? new MapStorage();
 	let loaded = null;
+	/**
+	 * The frame callbacks the page would run, in the order it queued them.
+	 *
+	 * The selection button looks for the host's bar frame by frame, so a check about a bar that
+	 * appears late has to be able to run those frames itself. Handing the sandbox the real
+	 * `requestAnimationFrame` would make it impossible to say when a frame happened.
+	 */
+	const frames = [];
 
 	const sandbox = {
 		// The plugin's own reports go to the console and nowhere else, so a check that wants to read one
@@ -128,6 +136,12 @@ function loadBundle(options = {}) {
 		URL,
 		URLSearchParams,
 		Blob: globalThis.Blob,
+		// The page runs frames; the sandbox keeps them so a check can run one at a time.
+		requestAnimationFrame: (callback) => {
+			frames.push(callback);
+			return frames.length;
+		},
+		cancelAnimationFrame: () => {},
 		AbortController: undefined,
 		fetch: options.fetch
 	};
@@ -195,7 +209,7 @@ function loadBundle(options = {}) {
 		logger: console
 	};
 	exports.apply(context);
-	return { exports, slots, effects, localeRegistrations, registered, components, documentListeners, documentListenerPhases, sandbox };
+	return { exports, slots, effects, localeRegistrations, registered, components, documentListeners, documentListenerPhases, sandbox, frames };
 }
 
 /** A minimal `Storage` stand-in that records what the plugin persists. */
@@ -4393,6 +4407,47 @@ async function asyncChecks() {
 		assertEqual(portalled.props.container, surface, "into the surface the selection is in");
 		assertEqual(portalled.props.children.props["data-term-dictionary"], "selection-explain", "as a second item on the same menu");
 		assertEqual(portalled.props.children.props.children, "textExplain", "labelled through the plugin's dictionaries");
+
+		// The bar is opened by the host when the gesture ends, so it often appears a few frames
+		// AFTER the plugin already knows about the selection. The button has to keep looking: a
+		// one-shot look leaves it standing on its own directly above the bar that arrives next,
+		// which reads as the two UI overlapping. This surface only exists after several frames
+		// have already been run without it.
+		const lateSurface = {
+			getAttribute: () => "false",
+			firstElementChild: null,
+			getBoundingClientRect: () => ({ left: 100, top: 200, right: 160, bottom: 228, width: 60, height: 28 })
+		};
+		let barVisible = false;
+		const lateReact = makeReactStub();
+		const lateBundle = loadBundle({
+			react: lateReact,
+			document: {
+				querySelector: () => null,
+				querySelectorAll: () => (barVisible ? [lateSurface] : []),
+				addEventListener: () => {},
+				removeEventListener: () => {},
+				hidden: false
+			}
+		});
+		const renderLatePill = () => {
+			lateReact.__beginRender();
+			return lateBundle.exports.selectionExplain({ selection: fauxSelection(), t: (key) => key, onExplain: () => {} });
+		};
+		const runLateFrame = () => {
+			const next = lateBundle.frames.shift();
+			if (next !== undefined) next();
+		};
+		const early = renderLatePill();
+		assert(early.type !== "portal", "before there is a bar the button is not portalled anywhere");
+		for (let index = 0; index < 3; index++) runLateFrame();
+		barVisible = true;
+		// One more look after the bar exists: the loop must still be running, or this frame is
+		// the one that never happens.
+		runLateFrame();
+		const late = renderLatePill();
+		assertEqual(late.type, "portal", "the next look finds the bar and moves the item into it");
+		assertEqual(late.props.container, lateSurface, "into the surface that appeared after the selection did");
 
 		const barTree = renderOverlay(overlay, fauxSelection());
 		assertEqual(

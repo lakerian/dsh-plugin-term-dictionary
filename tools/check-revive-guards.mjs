@@ -117,6 +117,13 @@ const mutations = [
 		filter: "textExplain"
 	},
 	{
+		name: "the selection button stops looking for the bar after the first frame",
+		file: `lib/core/overlay.js`,
+		find: "\t\t\tplace();\n\t\t\tframe = schedule();",
+		replace: "\t\t\tplace();\n\t\t\tframe = 0;",
+		filter: "textExplain"
+	},
+	{
 		name: "the overlay never renders the explanation bubble",
 		file: `lib/core/shell.js`,
 		find: "explain === null",
