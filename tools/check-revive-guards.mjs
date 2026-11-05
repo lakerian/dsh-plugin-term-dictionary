@@ -82,17 +82,24 @@ const mutations = [
 		filter: "deletedGroupRestore"
 	},
 	{
-		name: "the plugin's own selection affordance stands beside the host's bar",
+		name: "the selection gets no explain button beside the host's bar",
 		file: `lib/core/shell.js`,
-		find: "selection === null || props.textActionsAvailable",
-		replace: "selection === null",
+		find: "\t\tselection === null\n\t\t\t? null\n\t\t\t: h(SelectionExplain, {",
+		replace: "\t\tselection === null\n\t\t\t? null\n\t\t\t: null && h(SelectionExplain, {",
 		filter: "textExplain"
 	},
 	{
-		name: "the explained term is never written to the dictionary",
+		name: "the add press is never written to the dictionary",
 		file: `lib/core/shell.js`,
-		find: "const text = definitionText(answer.definition);\n\t\tawait noteSighting({",
-		replace: "const text = definitionText(answer.definition);\n\t\tif (false) await noteSighting({",
+		find: "\t\tawait noteSighting({\n\t\t\tterm: state.term,",
+		replace: "\t\tif (false) await noteSighting({\n\t\t\tterm: state.term,",
+		filter: "textExplain"
+	},
+	{
+		name: "the bubble offers no add button",
+		file: `lib/core/overlay.js`,
+		find: "view.saved !== true && view.phase !== \"waiting\" && view.phase !== \"failed\"",
+		replace: "false",
 		filter: "textExplain"
 	},
 	{

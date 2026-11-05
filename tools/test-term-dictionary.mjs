@@ -4307,14 +4307,25 @@ async function asyncChecks() {
 			explainView = overlay.explain.getSnapshot();
 		}
 		assertEqual(explainView.term, "Quorum", "the bubble names the term the gesture resolved");
-		assertEqual(explainView.saved, true, "the press collected the term on the way");
-		assertEqual(overlay.store.list("", "all").map((entry) => entry.term), ["Quorum"], "so the transcript has something to underline");
+		assertEqual(explainView.phase, "text", "the explanation is written, not still being asked for");
+		assertEqual(explainView.saved, false, "and nothing is collected until the reader says so");
+		assertEqual(overlay.store.list("", "all").length, 0, "so the dictionary is untouched on the way");
 
 		react.__beginRender();
 		const tree = bundle.components[overlayIndex]({ ...overlay, t: (key) => key });
 		const bubbles = find(tree, (node) => node.type === bundle.exports.explainBubble);
 		assertEqual(bubbles.length, 1, "the overlay renders the bubble");
 		assertEqual(bubbles[0].props.view.term, "Quorum", "with the term being explained");
+		// The bubble is a function component, so its own tree only exists once it is rendered — with
+		// its own React stub, because the test stub keeps one hook slot table per page and two
+		// components rendering through the same table would read each other's hooks.
+		const bubbleReact = makeReactStub();
+		const bubbleBundle = loadBundle({ react: bubbleReact });
+		bubbleReact.__beginRender();
+		const bubbleTree = bubbleBundle.exports.explainBubble({ view: explainView, t: (key) => key, onAdd: () => {}, onClose: () => {} });
+		const addButtons = find(bubbleTree, (node) => node.props?.["data-term-dictionary"] === "explain-add");
+		assertEqual(addButtons.length, 1, "and the bubble offers the one step the reader asked for");
+		assertEqual(addButtons[0].props.children, "explainAdd", "labelled through the plugin's dictionaries");
 
 		// The reveal: the host answers with one finished gloss, and the bubble writes it out a couple
 		// of characters at a time — the "being written" reading of the feature.
@@ -4322,8 +4333,15 @@ async function asyncChecks() {
 		explainView = overlay.explain.getSnapshot();
 		assertEqual(explainView.text, gloss, "and finishes with the whole gloss");
 
-		// One gesture, one bar: while the host can show its bar, the plugin's own selection affordance
-		// steps aside; on a page without that channel it is the only way in, so it comes back.
+		bubbles[0].props.onAdd();
+		for (let index = 0; index < 10; index++) await drainMicrotasks();
+		explainView = overlay.explain.getSnapshot();
+		assertEqual(explainView.saved, true, "the add press collects the term");
+		assertEqual(overlay.store.list("", "all").map((entry) => entry.term), ["Quorum"], "so the transcript has something to underline");
+
+		// One gesture, one bar: a selection now shows the host's own 「引用文本」 and this plugin's
+		// 「解释」 side by side, so the old add-to-dictionary affordance must not stand beside it. On
+		// a page without the text-interaction channel the same button still opens the bubble.
 		const fauxSelection = () => ({ term: "Quorum", context: "", rect: { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 } });
 		const renderOverlay = (face, selection) => {
 			react.__beginRender();
@@ -4333,10 +4351,16 @@ async function asyncChecks() {
 				selection: { subscribe: () => () => {}, getSnapshot: () => selection }
 			});
 		};
+		const barTree = renderOverlay(overlay, fauxSelection());
 		assertEqual(
-			find(renderOverlay(overlay, fauxSelection()), (node) => node.props?.label === "selectAdd").length,
+			find(barTree, (node) => node.type === bundle.exports.selectionExplain).length,
+			1,
+			"a selection gets the explain button that stands beside the host's bar"
+		);
+		assertEqual(
+			find(barTree, (node) => node.props?.label === "selectAdd").length,
 			0,
-			"the host's bar leaves no second affordance beside it"
+			"and no add-to-dictionary affordance stands in for it"
 		);
 
 		const fallbackReact = makeReactStub();
@@ -4348,7 +4372,8 @@ async function asyncChecks() {
 			t: (key) => key,
 			selection: { subscribe: () => () => {}, getSnapshot: () => fauxSelection() }
 		});
-		assertEqual(find(fallbackTree, (node) => node.props?.label === "selectAdd").length, 1, "without the host's channel the plugin's own affordance is the way in");
+		assertEqual(find(fallbackTree, (node) => node.type === fallback.exports.selectionExplain).length, 1, "without the host's channel the same button opens the bubble");
+		assertEqual(find(fallbackTree, (node) => node.props?.label === "selectAdd").length, 0, "and the old add affordance no longer stands in for it");
 		assertEqual(fallback.slots.includes("conversation.chat.text-interaction"), false, "and it registers no bar button");
 	});
 
@@ -4405,7 +4430,10 @@ async function asyncChecks() {
 			explainView = overlay.explain.getSnapshot();
 		}
 		assertEqual(explainView.term, "quorum", "the word under the pointer, not the line's first word");
-		assertEqual(explainView.saved, true, "and the explained word is collected");
+		assertEqual(explainView.saved, false, "and the explained word is not collected on the way");
+		assertEqual(overlay.store.list("", "all").length, 0, "the gesture alone writes nothing");
+		await overlay.addExplain();
+		assertEqual(overlay.explain.getSnapshot().saved, true, "the add press is what collects it");
 		assertEqual(overlay.store.list("", "all").map((entry) => entry.term), ["quorum"], "so the transcript can underline it");
 	});
 
@@ -4455,7 +4483,10 @@ async function asyncChecks() {
 			explainView = overlay.explain.getSnapshot();
 		}
 		assertEqual(explainView.term, "alpha quorum beta", "the phrase the user selected, not the word the caret would have named");
-		assertEqual(explainView.saved, true, "and the phrase is collected");
+		assertEqual(explainView.saved, false, "and the phrase is only written if the reader asks for it");
+		assertEqual(overlay.store.list("", "all").length, 0, "the dictionary is untouched by the gesture alone");
+		await overlay.addExplain();
+		assertEqual(overlay.explain.getSnapshot().saved, true, "pressing add is what collects the phrase");
 		assertEqual(overlay.store.list("", "all").map((entry) => entry.term), ["alpha quorum beta"], "so the transcript can underline it");
 	});
 
