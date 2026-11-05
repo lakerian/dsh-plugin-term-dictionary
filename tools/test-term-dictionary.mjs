@@ -4089,6 +4089,60 @@ async function asyncChecks() {
 		assertEqual(toasts.map((toast) => toast.text), ["toastRevived"], "and the notice names what came back, because the row leaving is the only other sign");
 	});
 
+	await asyncCheck("panel: the row's delete acts and the toast's 撤回 restores it, with no dialog on the way", "deleteUndo", async () => {
+		// The reported bug and the shape of its fix, driven the way a user drives them: press the row's
+		// trash, let the deferred work run, read the toast the panel raised, then press ITS action. That no
+		// check existed for this path is how a self-recursive `ask()` shipped while all three suites stayed
+		// green — so this one exists as the thing the mutation harness can point at.
+		const toasts = [];
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("Quorum", { definition: { gloss: "g" } });
+
+		const props = { ...face, t: (key) => key, setToast: (value) => toasts.push(value) };
+		const renderPanel = () => {
+			react.__beginRender();
+			return bundle.components[index](props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+
+		const trash = find(renderPanel(), (node) => node.props?.title === "remove" && typeof node.props.onClick === "function")[0];
+		assert(trash !== undefined, "the row has a delete button");
+		trash.props.onClick();
+		// The delete runs one task later and the toast lands after its own await — the same two drains the
+		// neighbouring checks use for the same shape.
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(face.store.list("", "deleted").map((entry) => entry.term), ["Quorum"], "the press removed the row for real");
+		assertEqual(face.store.list("", "all").length, 0, "and it is gone from the live list");
+
+		assertEqual(toasts.length, 1, "one toast offers the way back");
+		assertEqual(toasts[0].text, "undoDeleted", "it says what happened");
+		assertEqual(toasts[0].undoable, true, "with the 撤回 action the shell renders from `undoable`");
+		assert(typeof toasts[0].onAction === "function", "and the action is wired");
+		toasts[0].onAction();
+		await drainMicrotasks();
+		await drainMicrotasks();
+		assertEqual(face.store.list("", "all").map((entry) => entry.term), ["Quorum"], "pressing 撤回 brings the row back");
+		assertEqual(face.store.list("", "deleted").length, 0, "and the tombstone goes with it");
+	});
+
 	await asyncCheck("store: reviving reports whether it did anything, and never invents a write", "revive", async () => {
 		// The store's half. Three outcomes, and only the first one is a write: reviving a live entry
 		// and reviving a term that was never here are both no-ops, so pressing a stale button — or

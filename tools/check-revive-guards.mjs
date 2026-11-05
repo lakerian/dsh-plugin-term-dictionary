@@ -664,6 +664,13 @@ const mutations = [
 		filter: "the left margin of a line"
 	},
 	{
+		name: "the row's delete toast loses its 撤回, and no dialog exists to catch the miss",
+		file: "lib/core/views.js",
+		find: "undoable: true, onAction: () => void store.restoreEntry(entry.id)",
+		replace: "undoable: false, onAction: null",
+		filter: "deleteUndo"
+	},
+	{
 		name: "the build guard copies literal text again",
 		file: "tools/build-client.mjs",
 		find: 'out += character === "\\n" ? "\\n" : " ";',
