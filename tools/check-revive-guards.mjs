@@ -110,6 +110,13 @@ const mutations = [
 		filter: "textContext"
 	},
 	{
+		name: "a right-click inside a selection explains the word under the pointer instead of the phrase",
+		file: `lib/core/shell.js`,
+		find: "if (action === null && request.trigger === \"contextmenu\" && request.hasSelection === true && request.readText() !== null) {",
+		replace: "if (false) {",
+		filter: "textPhrase"
+	},
+	{
 		name: "the import ignores the opt-in",
 		file: `lib/core/transfer.js`,
 		find: "const retract = options?.includeDeleted === true;",
