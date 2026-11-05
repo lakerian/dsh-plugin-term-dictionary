@@ -63,9 +63,23 @@ const mutations = [
 	{
 		name: "the deleted filter falls back to the live list",
 		file: `lib/core/store.js`,
-		find: 'if (filter === "deleted") return dictionary.listDeleted(state, query).filter((entry) => (typeof entry.group === "string" ? entry.group : "") === at);',
-		replace: 'if (filter === "deleted") return listEntries(state, query, "all", at);',
+		find: "const deleted = dictionary.listDeleted(state, query);",
+		replace: "const deleted = listEntries(state, query, \"all\", at);",
 		filter: "revivePanel"
+	},
+	{
+		name: "the top level of the deleted view hides tombstones that carry a group",
+		file: `lib/core/store.js`,
+		find: "if (at === \"\") return deleted;",
+		replace: "if (at === \"\" && 1 === 2) return deleted;",
+		filter: "deletedGroupRestore"
+	},
+	{
+		name: "the group row's restore press is wired to nothing",
+		file: `lib/core/views.js`,
+		find: "h(Button, { label: t(\"reviveGroup\"), onClick: () => onReviveGroup(group.path) }, t(\"reviveGroup\"))",
+		replace: "h(Button, { label: t(\"reviveGroup\"), onClick: () => {}, }, t(\"reviveGroup\"))",
+		filter: "deletedGroupRestore"
 	},
 	{
 		name: "the import ignores the opt-in",

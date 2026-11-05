@@ -2692,6 +2692,42 @@ test("panel: the deleted view renders the tombstones and its 撤回 control name
 	buttons[0].props.onClick();
 	assertEqual(revived.map((entry) => entry.id), ["id-1"], "which hands the row's own entry to the caller");
 
+	// A tombstone that carries a group names it on its own row, and the group gets ONE row above the
+	// flat list with the single press that revives the whole group — one deletion decision, one press
+	// back. The ungrouped tombstone renders no badge and no group row.
+	const revivedGroups = [];
+	const grouped = bundle.exports.deletedList({
+		entries: [
+			{ id: "id-2", term: "A", key: "a", deletedAt: 20, group: "backend" },
+			{ id: "id-3", term: "B", key: "b", deletedAt: 10, group: "backend" },
+			{ id: "id-1", term: "Entropy", key: "entropy", deletedAt: 20261009 }
+		],
+		t,
+		onRevive: () => {},
+		onReviveGroup: (path) => revivedGroups.push(path)
+	});
+	const groupRows = [];
+	const badges = [];
+	const groupButtons = [];
+	const walkGrouped = (node) => {
+		if (node === null || node === undefined || typeof node !== "object") return;
+		if (Array.isArray(node)) {
+			for (const child of node) walkGrouped(child);
+			return;
+		}
+		if (typeof node.props?.["data-term-deleted-group"] === "string") groupRows.push(node);
+		if (node.props?.title === "groupLabel" && typeof node.props.children === "string") badges.push(node);
+		if (node.props?.label === "reviveGroup" && typeof node.props.onClick === "function") groupButtons.push(node);
+		walkGrouped(node.props?.children);
+	};
+	walkGrouped(grouped);
+	assertEqual(groupRows.length, 1, "the two tombstones of one group get one group row, not two");
+	assertEqual(groupRows[0].props["data-term-deleted-group"], "backend", "which names the group path");
+	assertEqual(badges.map((badge) => badge.props.children), ["backend", "backend"], "and every tombstone of the group names it on its own row");
+	assertEqual(groupButtons.length, 1, "the group row carries exactly one way back");
+	groupButtons[0].props.onClick();
+	assertEqual(revivedGroups, ["backend"], "which asks the caller for exactly that group");
+
 	// Nothing deleted is a state, not an empty list: it says so.
 	const blank = bundle.exports.deletedList({ entries: [], t, onRevive: () => {} });
 	text.length = 0;
@@ -4141,6 +4177,74 @@ async function asyncChecks() {
 		await drainMicrotasks();
 		assertEqual(face.store.list("", "all").map((entry) => entry.term), ["Quorum"], "pressing 撤回 brings the row back");
 		assertEqual(face.store.list("", "deleted").length, 0, "and the tombstone goes with it");
+	});
+
+	await asyncCheck("panel: the deleted view shows a deleted group's name and restores the whole group in one press", "deletedGroupRestore", async () => {
+		// Item 4 of the debt list: deleting a group put its tombstones on the deleted list, but the
+		// top-level deleted view only showed tombstones whose group matched the folder you stand in —
+		// which at the top level is none, so the group looked like it had vanished without trace.
+		// The rows now appear at the top level, carry the group's name, and one group row above them
+		// restores the whole group in one press.
+		const toasts = [];
+		const react = makeReactStub();
+		const bundle = loadBundle({ react });
+		const index = bundle.registered.findIndex((options) => options.name === "main");
+		const face = bundle.registered[index].inject();
+		await drainMicrotasks();
+		await face.store.saveEntry("A", { group: "backend", definition: { gloss: "g" } });
+		await face.store.saveEntry("B", { group: "backend", definition: { gloss: "g" } });
+		await face.store.saveEntry("C", { definition: { gloss: "g" } });
+		await face.store.deleteGroup("backend");
+		assertEqual(face.store.list("", "deleted").map((entry) => entry.term).sort(), ["A", "B"], "at the top level the deleted list shows the group's tombstones rather than hiding them");
+
+		const props = { ...face, t: (key) => key, setToast: (value) => toasts.push(value) };
+		const renderPanel = () => {
+			react.__beginRender();
+			return bundle.components[index](props);
+		};
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+
+		const tabs = find(renderPanel(), (node) => node.props?.role === "tab");
+		const deletedTab = tabs.find((tab) => tab.props.children === "filterDeleted");
+		deletedTab.props.onClick();
+		const views = find(renderPanel(), (node) => node.type === bundle.exports.deletedList);
+		assertEqual(views.length, 1, "with the deleted tab selected, the panel's list IS the deleted view");
+		const view = views[0];
+		assertEqual(view.props.entries.map((entry) => entry.term).sort(), ["A", "B"], "fed every tombstone of the deleted group");
+		assert(typeof view.props.onReviveGroup === "function", "and handed the group way back");
+
+		// The rows the view itself renders: one row for the group above the flat list, and pressing it
+		// must hand the panel exactly that group's path.
+		const asked = [];
+		const rendered = bundle.exports.deletedList({ entries: view.props.entries, t: (key) => key, onRevive: () => {}, onReviveGroup: (path) => asked.push(path) });
+		const strip = find(rendered, (node) => typeof node.props?.["data-term-deleted-group"] === "string");
+		assertEqual(strip.map((row) => row.props["data-term-deleted-group"]), ["backend"], "one group row above the flat rows");
+		const press = find(rendered, (node) => node.props?.label === "reviveGroup" && typeof node.props.onClick === "function");
+		assertEqual(press.length, 1, "carrying the labelled press");
+		press[0].props.onClick();
+		assertEqual(asked, ["backend"], "which hands the caller the group's path");
+
+		// The panel's half of that press: every tombstone of the group is revived, the group itself
+		// comes back with them, and the toast says so.
+		await view.props.onReviveGroup("backend");
+		await drainMicrotasks();
+		assertEqual(face.store.list("", "deleted").length, 0, "every tombstone of the group is gone");
+		assertEqual(face.store.list("", "all").map((entry) => entry.term), ["C"], "the top level keeps the entry that never belonged to the group");
+		assertEqual(face.store.list("", "all", "backend").map((entry) => entry.term).sort(), ["A", "B"], "and the revived entries are back inside their group — the tombstone kept the path");
+		assertEqual(toasts.map((toast) => toast.text), ["toastRevivedGroup"], "and the notice names the group and the count");
 	});
 
 	await asyncCheck("store: reviving reports whether it did anything, and never invents a write", "revive", async () => {
