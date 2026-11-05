@@ -1254,6 +1254,45 @@ asyncTest("selection: the context is one sentence, never the whole transcript", 
 	assert(!reported.context.includes("Filler message 0"), "the context must not be the whole transcript");
 });
 
+asyncTest("selection: a drag selection waits for the pointer to lift before offering the pill", async () => {
+	// The regression guard for "选中文字不松开时只出现「解释」、没有「引用文本」".
+	//
+	// The host only opens its own bar when the selection gesture ends (its dispatch skips while
+	// the pointer is selecting). This layer used to publish a selection on a debounce, so the
+	// pill appeared mid-drag and stood there alone; the two only met once the user let go. A
+	// drag still in motion is not a settled selection, so nothing is published until it lifts.
+	const messages = [{ text: "We adopted the WriteAheadLog for durability." }];
+	/** The window's selection, filled in once the region exists. */
+	let live = null;
+	const { region, log, fire } = makeLayer(messages, 0, { wrap: true, selection: () => live });
+	const scroll = region.children[0];
+	const last = scroll.children[scroll.children.length - 1];
+	const node = textNodeOf(last);
+	const at = last.textContent.indexOf("WriteAheadLog");
+	live = {
+		isCollapsed: false,
+		rangeCount: 1,
+		toString: () => "WriteAheadLog",
+		getRangeAt: () => ({
+			commonAncestorContainer: node,
+			startContainer: node,
+			endContainer: node,
+			startOffset: at,
+			getBoundingClientRect: () => last.rect
+		})
+	};
+	fire("mousedown", { button: 0, target: element({ tag: "P" }) });
+	fire("selectionchange", {});
+	// Long enough to outlast the debounce: without the gesture gate this is exactly when the
+	// pill used to appear.
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	assertEqual(log.selection.filter((entry) => entry !== null).length, 0, "no pill while the drag is still running");
+	fire("pointerup", { button: 0 });
+	const reported = log.selection.filter((entry) => entry !== null).pop();
+	assert(reported !== undefined, "the pill arrives once the pointer lifts");
+	assertEqual(reported.text, "WriteAheadLog", "with the settled phrase");
+});
+
 asyncTest("collect: the auto-collect switch stops collection without costing the message", async () => {
 	// The switch ("加上功能开关") has to be honest in both directions: off means nothing is
 	// collected AND the message is not marked as read, so turning it back on still sees it.

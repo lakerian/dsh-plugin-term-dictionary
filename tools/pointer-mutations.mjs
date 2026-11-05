@@ -240,5 +240,16 @@ export const MUTATIONS = [
 		find: "\t\tif (key === \"ok\" || !(value > count)) continue;",
 		replace: "\t\tif (!(value > count)) continue;",
 		expect: "beacon: a report names the hit-test stage that refused most"
+	},
+	{
+		id: "M25",
+		claim: "a selection raised by a drag is not published until the pointer lifts",
+		// The host opens its own bar only at the end of the gesture; publishing during the drag
+		// raised this plugin's pill alone, which is what the user saw as one control appearing
+		// before the other. The gate is the whole point, so removing it has to turn the check red.
+		file: join(coreDir, "interact.js"),
+		find: "\t\tif (pointerDown) return;",
+		replace: "\t\tif (false && pointerDown) return;",
+		expect: "selection: a drag selection waits for the pointer to lift before offering the pill"
 	}
 ];
