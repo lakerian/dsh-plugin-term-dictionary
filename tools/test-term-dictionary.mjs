@@ -4408,6 +4408,37 @@ async function asyncChecks() {
 		assertEqual(portalled.props.children.props["data-term-dictionary"], "selection-explain", "as a second item on the same menu");
 		assertEqual(portalled.props.children.props.children, "textExplain", "labelled through the plugin's dictionaries");
 
+		// The item the host seats inside the bar sits in a `display:contents` outlet, so that
+		// first child measures 0x0 — reading the first child's box therefore skips every real
+		// bar and leaves the button standing on its own above it. The surface itself is the
+		// measurable box; this is the shape the live page has, and the one the screenshot
+		// showing two pills on top of each other was.
+		const contentAnchor = { getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }) };
+		const contentsSurface = {
+			getAttribute: () => "false",
+			firstElementChild: contentAnchor,
+			getBoundingClientRect: () => ({ left: 300, top: 100, right: 360, bottom: 128, width: 60, height: 28 })
+		};
+		const contentsReact = makeReactStub();
+		const contentsBundle = loadBundle({
+			react: contentsReact,
+			document: {
+				querySelector: () => null,
+				querySelectorAll: () => [contentsSurface],
+				addEventListener: () => {},
+				removeEventListener: () => {},
+				hidden: false
+			}
+		});
+		const renderContentsPill = () => {
+			contentsReact.__beginRender();
+			return contentsBundle.exports.selectionExplain({ selection: fauxSelection(), t: (key) => key, onExplain: () => {} });
+		};
+		renderContentsPill();
+		const contentsPill = renderContentsPill();
+		assertEqual(contentsPill.type, "portal", "a bar whose outlet has no box of its own is still a bar");
+		assertEqual(contentsPill.props.container, contentsSurface, "the surface, not its display:contents outlet, is the container");
+
 		// The bar is opened by the host when the gesture ends, so it often appears a few frames
 		// AFTER the plugin already knows about the selection. The button has to keep looking: a
 		// one-shot look leaves it standing on its own directly above the bar that arrives next,

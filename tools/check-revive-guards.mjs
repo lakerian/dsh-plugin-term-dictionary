@@ -131,6 +131,13 @@ const mutations = [
 		filter: "textExplain"
 	},
 	{
+		name: "the bar's own box is ignored, so a display:contents outlet hides it",
+		file: `lib/core/overlay.js`,
+		find: "\t\t\tconst own = measure(surface);\n\t\t\tif (own !== null) return own;",
+		replace: "\t\t\tconst own = null;\n\t\t\tif (own !== null) return own;",
+		filter: "textExplain"
+	},
+	{
 		name: "a right-click never asks the caret for the word under it",
 		file: `lib/core/shell.js`,
 		find: "\n\t\t\t\tconst word = caretWordAt(point);",
