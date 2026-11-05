@@ -82,6 +82,27 @@ const mutations = [
 		filter: "deletedGroupRestore"
 	},
 	{
+		name: "the plugin's own selection affordance stands beside the host's bar",
+		file: `lib/core/shell.js`,
+		find: "selection === null || props.textActionsAvailable",
+		replace: "selection === null",
+		filter: "textExplain"
+	},
+	{
+		name: "the explained term is never written to the dictionary",
+		file: `lib/core/shell.js`,
+		find: "const text = definitionText(answer.definition);\n\t\tawait noteSighting({",
+		replace: "const text = definitionText(answer.definition);\n\t\tif (false) await noteSighting({",
+		filter: "textExplain"
+	},
+	{
+		name: "the overlay never renders the explanation bubble",
+		file: `lib/core/shell.js`,
+		find: "explain === null",
+		replace: "true",
+		filter: "textExplain"
+	},
+	{
 		name: "the import ignores the opt-in",
 		file: `lib/core/transfer.js`,
 		find: "const retract = options?.includeDeleted === true;",

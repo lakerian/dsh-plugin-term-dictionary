@@ -186,7 +186,10 @@ function loadBundle(options = {}) {
 			return typeof dispose === "function" ? dispose : () => {};
 		},
 		on: () => () => {},
-		get: () => undefined,
+		// The host's chat UI is optional in this composition, so the plugin reads it through `get`
+		// rather than declaring it — and a check that wants the text-gesture channel has to hand it
+		// over here, the way the presence of the web app would.
+		get: (name) => (name === "uiConversation" ? options.uiConversation ?? undefined : undefined),
 		logger: console
 	};
 	exports.apply(context);
@@ -4245,6 +4248,108 @@ async function asyncChecks() {
 		assertEqual(face.store.list("", "all").map((entry) => entry.term), ["C"], "the top level keeps the entry that never belonged to the group");
 		assertEqual(face.store.list("", "all", "backend").map((entry) => entry.term).sort(), ["A", "B"], "and the revived entries are back inside their group — the tombstone kept the path");
 		assertEqual(toasts.map((toast) => toast.text), ["toastRevivedGroup"], "and the notice names the group and the count");
+	});
+
+	await asyncCheck("panel: a text gesture hands the host's bar its button and the bubble writes the explanation out", "textExplain", async () => {
+		// The integration the user asked for: one bar for a gesture, and "explain" on it. The host owns
+		// the bar — it renders one keyed entry per gesture and hands the gesture to the first plugin
+		// that opens — so this check drives the gesture the way the host does, presses the button the
+		// bar would carry, and then reads the bubble and the dictionary the press leaves behind.
+		const interactions = [];
+		const react = makeReactStub();
+		const gloss = "a quorum of voters";
+		const answer = JSON.stringify({ ok: true, definition: { gloss }, source: "llm" });
+		const bundle = loadBundle({
+			react,
+			fetch: async (url) => ({ ok: true, status: 200, text: async () => (String(url).includes("/explain") ? answer : "") }),
+			uiConversation: { interactions: { register: (definition) => interactions.push(definition) } }
+		});
+		assertEqual(interactions.map((definition) => definition.id), ["term-dictionary"], "the plugin registers one text interaction");
+		const bar = bundle.registered.find((options) => options.name === "conversation.chat.text-interaction");
+		assert(bar !== undefined, "and one button for the host's bar");
+		assertEqual(bar.key, "term-dictionary", "the bar's keyed entry is the id the interaction opens");
+
+		let opened = 0;
+		interactions[0].onInteraction({ trigger: "selection", hasSelection: true, readText: () => "Quorum", open: () => (opened += 1) });
+		assertEqual(opened, 1, "a selection whose text is one term asks for the bar");
+		assertEqual(bundle.slots.includes("conversation.chat.text-interaction"), true, "through the host's own text-interaction slot");
+
+		const find = (tree, match) => {
+			const found = [];
+			const walk = (node) => {
+				if (node === null || node === undefined || typeof node !== "object") return;
+				if (Array.isArray(node)) {
+					for (const child of node) walk(child);
+					return;
+				}
+				if (match(node)) found.push(node);
+				walk(node.props?.children);
+			};
+			walk(tree);
+			return found;
+		};
+		const barIndex = bundle.registered.indexOf(bar);
+		const button = bundle.components[barIndex]({
+			t: (key) => key,
+			clearSelection: () => {},
+			dismiss: () => {}
+		});
+		assertEqual(button.props["data-term-dictionary"], "text-action", "the bar's button is this plugin's");
+		assertEqual(button.props.children, "textExplain", "labelled through the plugin's own dictionaries");
+		button.props.onClick({ preventDefault: () => {} });
+		for (let index = 0; index < 10; index++) await drainMicrotasks();
+
+		const overlayIndex = bundle.registered.findIndex((options) => options.name === "shell.overlay");
+		const overlay = bundle.registered[overlayIndex].inject();
+		let explainView = overlay.explain.getSnapshot();
+		for (let index = 0; index < 50 && explainView.phase === "waiting"; index++) {
+			await drainMicrotasks();
+			explainView = overlay.explain.getSnapshot();
+		}
+		assertEqual(explainView.term, "Quorum", "the bubble names the term the gesture resolved");
+		assertEqual(explainView.saved, true, "the press collected the term on the way");
+		assertEqual(overlay.store.list("", "all").map((entry) => entry.term), ["Quorum"], "so the transcript has something to underline");
+
+		react.__beginRender();
+		const tree = bundle.components[overlayIndex]({ ...overlay, t: (key) => key });
+		const bubbles = find(tree, (node) => node.type === bundle.exports.explainBubble);
+		assertEqual(bubbles.length, 1, "the overlay renders the bubble");
+		assertEqual(bubbles[0].props.view.term, "Quorum", "with the term being explained");
+
+		// The reveal: the host answers with one finished gloss, and the bubble writes it out a couple
+		// of characters at a time — the "being written" reading of the feature.
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		explainView = overlay.explain.getSnapshot();
+		assertEqual(explainView.text, gloss, "and finishes with the whole gloss");
+
+		// One gesture, one bar: while the host can show its bar, the plugin's own selection affordance
+		// steps aside; on a page without that channel it is the only way in, so it comes back.
+		const fauxSelection = () => ({ term: "Quorum", context: "", rect: { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 } });
+		const renderOverlay = (face, selection) => {
+			react.__beginRender();
+			return bundle.components[overlayIndex]({
+				...face,
+				t: (key) => key,
+				selection: { subscribe: () => () => {}, getSnapshot: () => selection }
+			});
+		};
+		assertEqual(
+			find(renderOverlay(overlay, fauxSelection()), (node) => node.props?.label === "selectAdd").length,
+			0,
+			"the host's bar leaves no second affordance beside it"
+		);
+
+		const fallbackReact = makeReactStub();
+		const fallback = loadBundle({ react: fallbackReact });
+		const fallbackIndex = fallback.registered.findIndex((options) => options.name === "shell.overlay");
+		fallbackReact.__beginRender();
+		const fallbackTree = fallback.components[fallbackIndex]({
+			...fallback.registered[fallbackIndex].inject(),
+			t: (key) => key,
+			selection: { subscribe: () => () => {}, getSnapshot: () => fauxSelection() }
+		});
+		assertEqual(find(fallbackTree, (node) => node.props?.label === "selectAdd").length, 1, "without the host's channel the plugin's own affordance is the way in");
+		assertEqual(fallback.slots.includes("conversation.chat.text-interaction"), false, "and it registers no bar button");
 	});
 
 	await asyncCheck("store: reviving reports whether it did anything, and never invents a write", "revive", async () => {
