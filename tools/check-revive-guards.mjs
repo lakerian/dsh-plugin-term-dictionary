@@ -103,6 +103,13 @@ const mutations = [
 		filter: "textExplain"
 	},
 	{
+		name: "a right-click never asks the caret for the word under it",
+		file: `lib/core/shell.js`,
+		find: "\n\t\t\t\tconst word = caretWordAt(point);",
+		replace: "\n\t\t\t\tconst word = null;",
+		filter: "textContext"
+	},
+	{
 		name: "the import ignores the opt-in",
 		file: `lib/core/transfer.js`,
 		find: "const retract = options?.includeDeleted === true;",

@@ -4352,6 +4352,63 @@ async function asyncChecks() {
 		assertEqual(fallback.slots.includes("conversation.chat.text-interaction"), false, "and it registers no bar button");
 	});
 
+	await asyncCheck("panel: a right-click names the word under the pointer even when nothing is marked yet", "textContext", async () => {
+		// The right-click half: the host's gesture carries no coordinates, so the layer records the
+		// point itself in the capture phase, and the word comes from the browser's caret. The caret is
+		// what the live page already trusts for hover - the geometry path reads a block snapshot whose
+		// detached nodes measure zero - and a word that is not in the dictionary has no segment to look
+		// up, so without this the bar could only ever explain words that were already collected.
+		const interactions = [];
+		const react = makeReactStub();
+		const gloss = "a signed account of events";
+		const answer = JSON.stringify({ ok: true, definition: { gloss }, source: "llm" });
+		const text = { nodeType: 3, nodeValue: "alpha quorum beta" };
+		const box = { left: 0, top: 0, right: 400, bottom: 20, width: 400, height: 20 };
+		const handlers = {};
+		const range = { setStart: () => {}, setEnd: () => {}, getClientRects: () => [box] };
+		const document = {
+			querySelector: () => null,
+			addEventListener: (type, handler) => {
+				handlers[type] = handler;
+			},
+			removeEventListener: () => {},
+			hidden: false,
+			caretRangeFromPoint: () => ({ startContainer: text, startOffset: 9 }),
+			createRange: () => range
+		};
+		const bundle = loadBundle({
+			react,
+			document,
+			fetch: async (url) => ({ ok: true, status: 200, text: async () => (String(url).includes("/explain") ? answer : "") }),
+			uiConversation: { interactions: { register: (definition) => interactions.push(definition) } }
+		});
+		const contextmenu = handlers.contextmenu;
+		assert(typeof contextmenu === "function", "the layer records where a context menu opened");
+		contextmenu({ clientX: 30, clientY: 8 });
+		let opened = 0;
+		interactions[0].onInteraction({ trigger: "contextmenu", hasSelection: false, readText: () => null, open: () => (opened += 1) });
+		assertEqual(opened, 1, "a right-click on a word that was never marked is still a gesture the bar can carry");
+
+		const bar = bundle.registered.find((options) => options.name === "conversation.chat.text-interaction");
+		const barIndex = bundle.registered.indexOf(bar);
+		const button = bundle.components[barIndex]({ t: (key) => key, clearSelection: () => {}, dismiss: () => {} });
+		assertEqual(button.props["data-term-dictionary"], "text-action", "the bar's button is the plugin's");
+		assertEqual(button.props.children, "textExplain", "labelled for the press");
+		button.props.onClick({ preventDefault: () => {} });
+		for (let index = 0; index < 10; index++) await drainMicrotasks();
+
+		const overlayIndex = bundle.registered.findIndex((options) => options.name === "shell.overlay");
+		const overlay = bundle.registered[overlayIndex].inject();
+		let explainView = overlay.explain.getSnapshot();
+		for (let index = 0; index < 50 && explainView.phase === "waiting"; index++) {
+			await drainMicrotasks();
+			explainView = overlay.explain.getSnapshot();
+		}
+		assertEqual(explainView.term, "quorum", "the word under the pointer, not the line's first word");
+		assertEqual(explainView.saved, true, "and the explained word is collected");
+		assertEqual(overlay.store.list("", "all").map((entry) => entry.term), ["quorum"], "so the transcript can underline it");
+	});
+
 	await asyncCheck("store: reviving reports whether it did anything, and never invents a write", "revive", async () => {
 		// The store's half. Three outcomes, and only the first one is a write: reviving a live entry
 		// and reviving a term that was never here are both no-ops, so pressing a stale button — or
