@@ -4312,6 +4312,7 @@ async function asyncChecks() {
 		});
 		assertEqual(button.props["data-term-dictionary"], "text-action", "the bar's button is this plugin's");
 		assertEqual(button.props.children, "textExplain", "labelled through the plugin's own dictionaries");
+		assertEqual(button.props.className, "td-text-action", "and wears the host's own floating-action pill");
 		button.props.onClick({ preventDefault: () => {} });
 		for (let index = 0; index < 10; index++) await drainMicrotasks();
 
@@ -4332,6 +4333,11 @@ async function asyncChecks() {
 		const bubbles = find(tree, (node) => node.type === bundle.exports.explainBubble);
 		assertEqual(bubbles.length, 1, "the overlay renders the bubble");
 		assertEqual(bubbles[0].props.view.term, "Quorum", "with the term being explained");
+		const styleTags = find(tree, (node) => node.type === bundle.exports.textActionStyle);
+		assertEqual(styleTags.length, 1, "the overlay mounts the pills' stylesheet");
+		const styleNode = bundle.exports.textActionStyle();
+		assertEqual(styleNode.props["data-term-dictionary"], "text-action-style", "as this plugin's own style element");
+		assertEqual(styleNode.props.children.includes(".td-text-action{"), true, "and it styles the class both buttons wear");
 		// The bubble is a function component, so its own tree only exists once it is rendered — with
 		// its own React stub, because the test stub keeps one hook slot table per page and two
 		// components rendering through the same table would read each other's hooks.
@@ -4407,6 +4413,7 @@ async function asyncChecks() {
 		assertEqual(portalled.props.container, surface, "into the surface the selection is in");
 		assertEqual(portalled.props.children.props["data-term-dictionary"], "selection-explain", "as a second item on the same menu");
 		assertEqual(portalled.props.children.props.children, "textExplain", "labelled through the plugin's dictionaries");
+		assertEqual(portalled.props.children.props.className, "td-text-action", "and wears the same pill as the host's item beside it");
 
 		// The item the host seats inside the bar sits in a `display:contents` outlet, so that
 		// first child measures 0x0 — reading the first child's box therefore skips every real

@@ -138,6 +138,20 @@ const mutations = [
 		filter: "textExplain"
 	},
 	{
+		name: "the explain pill is dressed by hand instead of the host's recipe",
+		file: `lib/core/styles.js`,
+		find: 'const TEXT_ACTION_CLASS = "td-text-action";',
+		replace: 'const TEXT_ACTION_CLASS = "td-text-action-other";',
+		filter: "textExplain"
+	},
+	{
+		name: "the host's bar button drops the host's own pill class",
+		file: `lib/core/shell.js`,
+		find: "\t\t\t\tclassName: TEXT_ACTION_CLASS,\n\t\t\t\t\"aria-label\": title,",
+		replace: "\t\t\t\tclassName: undefined,\n\t\t\t\t\"aria-label\": title,",
+		filter: "textExplain"
+	},
+	{
 		name: "a right-click never asks the caret for the word under it",
 		file: `lib/core/shell.js`,
 		find: "\n\t\t\t\tconst word = caretWordAt(point);",
