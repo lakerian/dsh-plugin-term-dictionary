@@ -147,8 +147,10 @@ function loadBundle(options = {}) {
 	assertEqual(loaded.id, "dsh-plugin-term-dictionary", "bundle id must equal the package name");
 
 	const react = options.react ?? makeReactStub();
+	const portal = (children, container) => ({ type: "portal", props: { container, children } });
 	const platformRequire = (spec) => {
 		if (spec === "react") return react;
+		if (spec === "react-dom") return { createPortal: portal, flushSync: (callback) => callback() };
 		if (spec === "react/jsx-runtime") return { jsx: () => null, jsxs: () => null };
 		throw new Error(`node test harness has no platform module for ${JSON.stringify(spec)}`);
 	};
@@ -4321,17 +4323,28 @@ async function asyncChecks() {
 		// components rendering through the same table would read each other's hooks.
 		const bubbleReact = makeReactStub();
 		const bubbleBundle = loadBundle({ react: bubbleReact });
-		bubbleReact.__beginRender();
-		const bubbleTree = bubbleBundle.exports.explainBubble({ view: explainView, t: (key) => key, onAdd: () => {}, onClose: () => {} });
-		const addButtons = find(bubbleTree, (node) => node.props?.["data-term-dictionary"] === "explain-add");
-		assertEqual(addButtons.length, 1, "and the bubble offers the one step the reader asked for");
-		assertEqual(addButtons[0].props.children, "explainAdd", "labelled through the plugin's dictionaries");
+		const renderBubble = (view) => {
+			bubbleReact.__beginRender();
+			return bubbleBundle.exports.explainBubble({ view, t: (key) => key, onAdd: () => {}, onClose: () => {} });
+		};
+		const writing = renderBubble(explainView);
+		assertEqual(
+			find(writing, (node) => node.props?.["data-term-dictionary"] === "explain-add").length,
+			0,
+			"the offer to keep the term waits until the explanation is written"
+		);
 
 		// The reveal: the host answers with one finished gloss, and the bubble writes it out a couple
 		// of characters at a time — the "being written" reading of the feature.
 		await new Promise((resolve) => setTimeout(resolve, 400));
 		explainView = overlay.explain.getSnapshot();
 		assertEqual(explainView.text, gloss, "and finishes with the whole gloss");
+		assertEqual(explainView.complete, true, "the bubble knows the writing is over");
+
+		const written = renderBubble(explainView);
+		const addButtons = find(written, (node) => node.props?.["data-term-dictionary"] === "explain-add");
+		assertEqual(addButtons.length, 1, "and only then offers the one step the reader asked for");
+		assertEqual(addButtons[0].props.children, "explainAdd", "labelled through the plugin's dictionaries");
 
 		bubbles[0].props.onAdd();
 		for (let index = 0; index < 10; index++) await drainMicrotasks();
@@ -4351,6 +4364,36 @@ async function asyncChecks() {
 				selection: { subscribe: () => () => {}, getSnapshot: () => selection }
 			});
 		};
+
+		// One menu, not two pills: when the host's bar is on the page, the button is rendered INTO the
+		// bar's own container as its second item, so both share the surface the host positions and the
+		// layout is the container's. Placing it by measuring the bar was what put the two on top of
+		// each other whenever they chose the same side of the selection.
+		const surface = {
+			getAttribute: () => "false",
+			firstElementChild: null,
+			getBoundingClientRect: () => ({ left: 100, top: 200, right: 160, bottom: 228, width: 60, height: 28 })
+		};
+		const portalReact = makeReactStub();
+		const portalDocument = {
+			querySelector: () => null,
+			querySelectorAll: () => [surface],
+			addEventListener: () => {},
+			removeEventListener: () => {},
+			hidden: false
+		};
+		const portalBundle = loadBundle({ react: portalReact, document: portalDocument });
+		const renderPill = () => {
+			portalReact.__beginRender();
+			return portalBundle.exports.selectionExplain({ selection: fauxSelection(), t: (key) => key, onExplain: () => {} });
+		};
+		renderPill();
+		const portalled = renderPill();
+		assertEqual(portalled.type, "portal", "the explain item is portalled into the host's bar");
+		assertEqual(portalled.props.container, surface, "into the surface the selection is in");
+		assertEqual(portalled.props.children.props["data-term-dictionary"], "selection-explain", "as a second item on the same menu");
+		assertEqual(portalled.props.children.props.children, "textExplain", "labelled through the plugin's dictionaries");
+
 		const barTree = renderOverlay(overlay, fauxSelection());
 		assertEqual(
 			find(barTree, (node) => node.type === bundle.exports.selectionExplain).length,

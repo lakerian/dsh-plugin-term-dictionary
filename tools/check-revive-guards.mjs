@@ -96,10 +96,24 @@ const mutations = [
 		filter: "textExplain"
 	},
 	{
-		name: "the bubble offers no add button",
+		name: "the bubble offers the add press while it is still writing",
 		file: `lib/core/overlay.js`,
-		find: "view.saved !== true && view.phase !== \"waiting\" && view.phase !== \"failed\"",
+		find: "view.saved !== true && view.complete === true",
+		replace: "view.saved !== true",
+		filter: "textExplain"
+	},
+	{
+		name: "the bubble never offers the add press",
+		file: `lib/core/overlay.js`,
+		find: "view.saved !== true && view.complete === true",
 		replace: "false",
+		filter: "textExplain"
+	},
+	{
+		name: "the explain item never enters the host's bar",
+		file: `lib/core/overlay.js`,
+		find: "if (host !== null && typeof createPortal === \"function\") return createPortal(button, host);",
+		replace: "if (false) return createPortal(button, host);",
 		filter: "textExplain"
 	},
 	{
